@@ -3,6 +3,7 @@
 import json
 from typing import TypedDict
 
+from src.core.output_coercion import coerce_model_output, shorten_quote
 from src.core.settings import get_settings
 from src.llm.zhipu import chat
 from src.rag.service import retrieve
@@ -113,15 +114,21 @@ def _generate_with_llm(state: GraphState) -> GraphState:
     evidence = "\n".join([f"[[{c['id']}]] {c.get('text', '')}" for c in used_context])
     prompt = (
         "你是面试辅导助手，只能依据【证据块】回答，禁止编造。必须给出引用 chunk id。"
-        "输出严格 JSON，格式：{\"answer\":\"...\",\"citations\":[{\"id\":\"...\",\"quote\":\"...\"}]}。\n"
+        "只输出自然语言答案文本，不要输出 JSON，不要使用 ``` 代码块。"
+        "不要在答案里输出 citations 或 used_context。\n"
         f"问题：{state.get('question','')}\n【证据块】\n{evidence}"
     )
     content = chat([{"role": "user", "content": prompt}])
-    try:
-        data = json.loads(content)
-        return {**state, "answer": data.get("answer", ""), "citations": data.get("citations", [])}
-    except Exception:
-        return {**state, "answer": content, "citations": []}
+    answer, extra_citations = coerce_model_output(content)
+    citations = state.get("citations", []) or []
+    if not citations and extra_citations:
+        citations = extra_citations
+    citations = [
+        {**c, "quote": shorten_quote(c.get("quote", ""))}
+        for c in citations
+        if isinstance(c, dict)
+    ]
+    return {**state, "answer": answer, "citations": citations}
 
 
 def generate_final(state: GraphState) -> GraphState:
@@ -130,8 +137,12 @@ def generate_final(state: GraphState) -> GraphState:
             result = item.get("result", {})
             return {
                 **state,
-                "answer": result.get("answer", ""),
-                "citations": result.get("citations", []),
+                "answer": coerce_model_output(result.get("answer", ""))[0],
+                "citations": [
+                    {**c, "quote": shorten_quote(c.get("quote", ""))}
+                    for c in (result.get("citations", []) or [])
+                    if isinstance(c, dict)
+                ],
                 "used_context": result.get("used_context", state.get("used_context", [])),
             }
 

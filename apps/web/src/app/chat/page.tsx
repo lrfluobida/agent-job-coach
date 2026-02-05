@@ -1,6 +1,9 @@
 ﻿"use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 type ChatMessage = {
   role: "user" | "assistant";
@@ -32,6 +35,11 @@ type InterviewQAResponse = {
   error?: string;
 };
 
+function hasUnclosedFence(text: string) {
+  const matches = text.match(/```/g);
+  return (matches?.length ?? 0) % 2 === 1;
+}
+
 function makeTitle(text: string) {
   const trimmed = text.trim();
   const maxLen = 20;
@@ -49,6 +57,8 @@ export default function ChatPage() {
   const [openEvidenceIndex, setOpenEvidenceIndex] = useState<number | null>(null);
   const [expandedEvidence, setExpandedEvidence] = useState<Record<string, boolean>>({});
   const [expandedMeta, setExpandedMeta] = useState<Record<string, boolean>>({});
+  const [uploadedSourceId, setUploadedSourceId] = useState<string | null>(null);
+  const [useUploadedOnly, setUseUploadedOnly] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const evidenceRefs = useRef<Record<string, HTMLDivElement | null>>({});
@@ -69,6 +79,13 @@ export default function ChatPage() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
+  }, []);
+
+  useEffect(() => {
+    const saved = localStorage.getItem("jobcoach_last_source_id");
+    if (saved) {
+      setUploadedSourceId(saved);
+    }
   }, []);
 
   useEffect(() => {
@@ -108,12 +125,12 @@ export default function ChatPage() {
     }
   };
 
-  const runNonStream = async (question: string) => {
+  const runNonStream = async (question: string, filter: Record<string, unknown> | null) => {
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ message: question }),
+        body: JSON.stringify({ message: question, filter }),
       });
 
       const bodyText = await res.text();
@@ -168,6 +185,8 @@ export default function ChatPage() {
     abortCurrentStream();
 
     const userMessage: ChatMessage = { role: "user", content: input.trim() };
+    const filter: Record<string, unknown> | null =
+      useUploadedOnly && uploadedSourceId ? { source_id: uploadedSourceId } : null;
     setMessages((prev) => [...prev, userMessage]);
     setInput("");
     setLoading(true);
@@ -202,12 +221,12 @@ export default function ChatPage() {
       const res = await fetch("/api/chat/stream", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ message: userMessage.content }),
+        body: JSON.stringify({ message: userMessage.content, filter }),
         signal: controller.signal,
       });
 
       if (!res.ok || !res.body) {
-        await runNonStream(userMessage.content);
+        await runNonStream(userMessage.content, filter);
         return;
       }
 
@@ -295,7 +314,7 @@ export default function ChatPage() {
       }
     } catch (e: any) {
       if (e?.name !== "AbortError") {
-        await runNonStream(userMessage.content);
+        await runNonStream(userMessage.content, filter);
       }
     } finally {
       setLoading(false);
@@ -329,6 +348,28 @@ export default function ChatPage() {
         <p className="page-subtitle">Shift + Enter 换行，Enter 发送。Ctrl + K 聚焦输入框。</p>
       </div>
 
+      <div className="panel" style={{ marginBottom: 16 }}>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
+          <Link className="button" href="/ingest">
+            导入资料
+          </Link>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+            <input
+              type="checkbox"
+              checked={useUploadedOnly}
+              onChange={(e) => setUseUploadedOnly(e.target.checked)}
+              disabled={!uploadedSourceId}
+            />
+            只用上传资料
+          </label>
+          {!uploadedSourceId && (
+            <span style={{ fontSize: 12, color: "var(--muted)" }}>
+              还没有上传资料
+            </span>
+          )}
+        </div>
+      </div>
+
       {banner && <div className="banner" style={{ marginBottom: 16 }}>{banner}</div>}
       {err && <div className="banner" style={{ marginBottom: 16 }}>{err}</div>}
 
@@ -359,10 +400,65 @@ export default function ChatPage() {
                   {msg.stageText}
                 </div>
               )}
-              <div style={{ whiteSpace: "pre-wrap", marginTop: 4 }}>{msg.content}</div>
+              {msg.role === "assistant" ? (
+                msg.isStreaming && hasUnclosedFence(msg.content) ? (
+                  <pre style={{ whiteSpace: "pre-wrap", marginTop: 4, fontFamily: "inherit" }}>
+                    {msg.content}
+                  </pre>
+                ) : (
+                  <div style={{ marginTop: 4 }}>
+                    <ReactMarkdown
+                      remarkPlugins={[remarkGfm]}
+                      components={{
+                        ul: ({ children }) => (
+                          <ul style={{ paddingLeft: 20, listStyle: "disc" }}>{children}</ul>
+                        ),
+                        ol: ({ children }) => (
+                          <ol style={{ paddingLeft: 20, listStyle: "decimal" }}>{children}</ol>
+                        ),
+                        code: ({ children, className }) => (
+                          <code
+                            style={{
+                              background: "rgba(0,0,0,0.08)",
+                              padding: "2px 4px",
+                              borderRadius: 4,
+                              fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace",
+                            }}
+                            className={className}
+                          >
+                            {children}
+                          </code>
+                        ),
+                        pre: ({ children }) => (
+                          <pre
+                            style={{
+                              whiteSpace: "pre-wrap",
+                              background: "rgba(0,0,0,0.08)",
+                              padding: 10,
+                              borderRadius: 8,
+                              overflowX: "auto",
+                            }}
+                          >
+                            {children}
+                          </pre>
+                        ),
+                        a: ({ children, href }) => (
+                          <a href={href} target="_blank" rel="noreferrer">
+                            {children}
+                          </a>
+                        ),
+                      }}
+                    >
+                      {msg.content}
+                    </ReactMarkdown>
+                  </div>
+                )
+              ) : (
+                <div style={{ whiteSpace: "pre-wrap", marginTop: 4 }}>{msg.content}</div>
+              )}
               {msg.role === "assistant" && (
                 <>
-                  {(msg.citations ?? []).length > 0 && (
+                  {(msg.citations ?? []).length > 0 ? (
                     <div
                       style={{
                         display: "flex",
@@ -389,22 +485,36 @@ export default function ChatPage() {
                         </button>
                       ))}
                     </div>
+                  ) : (
+                    <div style={{ marginTop: 8, fontSize: 12, color: "var(--muted)" }}>
+                      无引用证据（模型未使用检索片段）
+                    </div>
                   )}
-                  <details style={{ marginTop: 10 }} open={openEvidenceIndex === index}>
-                    <summary style={{ cursor: "pointer", color: "var(--muted)" }}>
-                      查看证据（{msg.used_context?.length ?? 0}）
-                    </summary>
-                    <div style={{ marginTop: 8, display: "grid", gap: 12 }}>
-                      {(msg.used_context ?? []).map((item, idx) => {
+                  {(msg.citations ?? []).length > 0 && (msg.used_context ?? []).length > 0 && (
+                    <details style={{ marginTop: 10 }} open={openEvidenceIndex === index}>
+                      <summary style={{ cursor: "pointer", color: "var(--muted)" }}>
+                        查看证据（{msg.citations?.length ?? 0}）
+                      </summary>
+                      <div style={{ marginTop: 8, display: "grid", gap: 12 }}>
+                        {(msg.used_context ?? [])
+                          .filter((item) =>
+                            (msg.citations ?? []).some((c) => c.id === item.id),
+                          )
+                          .map((item, idx) => {
                         const contextId = item.id ?? `ctx-${idx}`;
                         const key = `${index}:${contextId}`;
                         const text = item.text ?? "";
+                        const quote =
+                          (msg.citations ?? []).find((c) => c.id === item.id)?.quote ?? "";
                         const isExpanded = expandedEvidence[key];
                         const metaExpanded = expandedMeta[key];
                         const shortText =
-                          text.length > 160 ? `${text.slice(0, 160)}...` : text;
+                          (quote || text).length > 160
+                            ? `${(quote || text).slice(0, 160)}...`
+                            : quote || text;
                         const score =
                           typeof item.score === "number" ? item.score.toFixed(3) : "n/a";
+                        const filename = item.metadata?.filename as string | undefined;
 
                         return (
                           <div
@@ -429,7 +539,9 @@ export default function ChatPage() {
                                 fontSize: 13,
                               }}
                             >
-                              <span style={{ fontWeight: 600 }}>{contextId}</span>
+                              <span style={{ fontWeight: 600 }}>
+                                {filename ? `${filename} · ${contextId}` : contextId}
+                              </span>
                               <span style={{ color: "var(--muted)" }}>相似度 {score}</span>
                             </div>
                             <div
@@ -439,7 +551,7 @@ export default function ChatPage() {
                                 wordBreak: "break-word",
                               }}
                             >
-                              {isExpanded ? text : shortText}
+                              {isExpanded ? (quote || text) : shortText}
                             </div>
                             {text.length > 160 && (
                               <button
@@ -500,9 +612,10 @@ export default function ChatPage() {
                             )}
                           </div>
                         );
-                      })}
-                    </div>
-                  </details>
+                        })}
+                      </div>
+                    </details>
+                  )}
                 </>
               )}
             </div>

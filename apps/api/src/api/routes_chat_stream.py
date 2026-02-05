@@ -5,6 +5,7 @@ from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from src.core.output_coercion import coerce_model_output, shorten_quote
 from src.graph.job_coach_graph import run_graph
 
 
@@ -34,7 +35,7 @@ async def chat_stream(payload: ChatStreamRequest):
             yield _sse_event("status", {"stage": "generate", "message": "生成回答..."})
             result = run_graph(payload.question, top_k=payload.top_k, filter=payload.filter)
 
-            answer = result.get("answer", "")
+            answer, _ = coerce_model_output(result.get("answer", ""))
             for chunk in _chunk_text(answer):
                 yield _sse_event("token", {"delta": chunk})
                 await asyncio.sleep(0.01)
@@ -43,7 +44,11 @@ async def chat_stream(payload: ChatStreamRequest):
             yield _sse_event(
                 "context",
                 {
-                    "citations": result.get("citations", []),
+                    "citations": [
+                        {**c, "quote": shorten_quote(c.get("quote", ""))}
+                        for c in (result.get("citations", []) or [])
+                        if isinstance(c, dict)
+                    ],
                     "used_context": result.get("used_context", []),
                 },
             )

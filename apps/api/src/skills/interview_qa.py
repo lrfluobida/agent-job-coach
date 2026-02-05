@@ -1,6 +1,7 @@
 ﻿import json
 import re
 
+from src.core.output_coercion import shorten_quote
 from src.llm.zhipu import chat
 from src.rag.service import retrieve
 from src.rag.store import count_collection
@@ -121,13 +122,13 @@ def run_interview_qa(
     if isinstance(citations, list):
         for item in citations:
             if isinstance(item, dict) and "quote" in item:
-                item["quote"] = _ensure_str(item["quote"])
+                item["quote"] = shorten_quote(_ensure_str(item["quote"]))
 
     if not citations and used_context:
         citations = [
             {
                 "id": used_context[0].get("id", ""),
-                "quote": used_context[0].get("text", "")[:120],
+                "quote": shorten_quote(used_context[0].get("text", "")),
             }
         ]
 

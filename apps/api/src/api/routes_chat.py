@@ -1,6 +1,7 @@
 ﻿from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
+from src.core.output_coercion import coerce_model_output, shorten_quote
 from src.graph.job_coach_graph import run_graph
 
 
@@ -21,9 +22,15 @@ def chat_ping():
 @router.post("/chat")
 def chat(payload: ChatRequest):
     result = run_graph(payload.question, top_k=payload.top_k, filter=payload.filter)
+    answer, _ = coerce_model_output(result.get("answer", ""))
+    citations = [
+        {**c, "quote": shorten_quote(c.get("quote", ""))}
+        for c in (result.get("citations", []) or [])
+        if isinstance(c, dict)
+    ]
     return {
         "ok": True,
-        "answer": result.get("answer", ""),
-        "citations": result.get("citations", []),
+        "answer": answer,
+        "citations": citations,
         "used_context": result.get("used_context", []),
     }

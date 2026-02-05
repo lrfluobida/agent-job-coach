@@ -7,6 +7,7 @@ from src.ingest.pipeline import ingest_text
 from src.rag.service import retrieve
 from src.skills.interview_qa import run_interview_qa
 from src.tools.mcp_client import mcp_call_tool, mcp_list_tools
+import hashlib
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +117,8 @@ def call_tool(name: str, args: dict, *, context: dict | None = None) -> dict:
         source_id = args.get("source_id") or context.get("source_id")
         if not source_id:
             text = args.get("text", "")
-            source_id = f\"note_{abs(hash(text)) % 100000}\"
+            digest8 = hashlib.sha256(text.encode("utf-8")).hexdigest()[:8]
+            source_id = f"note_{digest8}"
         return ingest_text(
             args.get("text", ""),
             source_type=source_type,
