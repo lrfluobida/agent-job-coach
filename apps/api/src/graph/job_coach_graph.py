@@ -1,0 +1,203 @@
+﻿from __future__ import annotations
+
+import json
+from typing import TypedDict
+
+from src.core.settings import get_settings
+from src.llm.zhipu import chat
+from src.rag.service import retrieve
+from src.tools.registry import call_tool, get_tool_specs
+
+
+class GraphState(TypedDict, total=False):
+    question: str
+    top_k: int
+    filter: dict | None
+    where: dict | None
+    used_context: list[dict]
+    tool_plan: list[dict]
+    tool_results: list[dict]
+    answer: str
+    citations: list[dict]
+
+
+def _build_where(filter_dict: dict | None) -> dict | None:
+    if not filter_dict:
+        return None
+    where: dict = {}
+    source_type = filter_dict.get("source_type")
+    source_id = filter_dict.get("source_id")
+    if source_type:
+        where["source_type"] = source_type
+    if source_id:
+        where["source_id"] = source_id
+    return where or None
+
+
+def normalize_input(state: GraphState) -> GraphState:
+    top_k = state.get("top_k", 5)
+    top_k = max(1, min(20, int(top_k)))
+    return {
+        **state,
+        "top_k": top_k,
+        "where": _build_where(state.get("filter")),
+    }
+
+
+def retrieve_evidence(state: GraphState) -> GraphState:
+    results = retrieve(state.get("question", ""), top_k=state.get("top_k", 5), where=state.get("where"))
+    return {**state, "used_context": results}
+
+
+def _plan_with_llm(question: str, tool_specs: list[dict]) -> list[dict]:
+    prompt = {
+        "role": "user",
+        "content": (
+            "你是工具规划器。只能从提供的工具列表中选择。\n"
+            "输出严格 JSON，格式：{\"tool_plan\":[{\"name\":\"...\",\"args\":{...}}]}。\n"
+            f"问题：{question}\n工具列表：{json.dumps(tool_specs, ensure_ascii=False)}"
+        ),
+    }
+    content = chat([prompt])
+    try:
+        data = json.loads(content)
+        plan = data.get("tool_plan", [])
+        return plan if isinstance(plan, list) else []
+    except Exception:
+        return []
+
+
+def plan_tools(state: GraphState) -> GraphState:
+    question = state.get("question", "")
+    tool_specs = [
+        {
+            "name": t.name,
+            "description": t.description,
+            "json_schema": t.json_schema,
+        }
+        for t in get_tool_specs()
+    ]
+
+    settings = get_settings()
+    if settings.zhipu_api_key:
+        plan = _plan_with_llm(question, tool_specs)
+        allowed = {t["name"] for t in tool_specs}
+        plan = [p for p in plan if isinstance(p, dict) and p.get("name") in allowed]
+        return {**state, "tool_plan": plan}
+
+    keywords = ["面试", "自我介绍", "项目", "如何回答", "怎么说"]
+    if any(k in question for k in keywords):
+        return {
+            **state,
+            "tool_plan": [
+                {"name": "skill_interview_qa", "args": {"question": question, "top_k": state.get("top_k", 5), "filter": state.get("filter")}}
+            ],
+        }
+    return {**state, "tool_plan": []}
+
+
+def execute_tools(state: GraphState) -> GraphState:
+    tool_plan = state.get("tool_plan", [])
+    results = []
+    for item in tool_plan:
+        name = item.get("name")
+        args = item.get("args") or {}
+        if not name:
+            continue
+        results.append({"name": name, "result": call_tool(name, args, context={})})
+    return {**state, "tool_results": results}
+
+
+def _generate_with_llm(state: GraphState) -> GraphState:
+    used_context = state.get("used_context", [])
+    evidence = "\n".join([f"[[{c['id']}]] {c.get('text', '')}" for c in used_context])
+    prompt = (
+        "你是面试辅导助手，只能依据【证据块】回答，禁止编造。必须给出引用 chunk id。"
+        "输出严格 JSON，格式：{\"answer\":\"...\",\"citations\":[{\"id\":\"...\",\"quote\":\"...\"}]}。\n"
+        f"问题：{state.get('question','')}\n【证据块】\n{evidence}"
+    )
+    content = chat([{"role": "user", "content": prompt}])
+    try:
+        data = json.loads(content)
+        return {**state, "answer": data.get("answer", ""), "citations": data.get("citations", [])}
+    except Exception:
+        return {**state, "answer": content, "citations": []}
+
+
+def generate_final(state: GraphState) -> GraphState:
+    for item in state.get("tool_results", []):
+        if item.get("name") == "skill_interview_qa":
+            result = item.get("result", {})
+            return {
+                **state,
+                "answer": result.get("answer", ""),
+                "citations": result.get("citations", []),
+                "used_context": result.get("used_context", state.get("used_context", [])),
+            }
+
+    settings = get_settings()
+    if settings.zhipu_api_key:
+        return _generate_with_llm(state)
+
+    # fallback without LLM
+    used_context = state.get("used_context", [])
+    if used_context:
+        return {
+            **state,
+            "answer": used_context[0].get("text", "")[:200],
+            "citations": [{"id": used_context[0].get("id", ""), "quote": used_context[0].get("text", "")[:120]}],
+        }
+    return {**state, "answer": "暂无可用证据，请先导入资料后再提问。", "citations": []}
+
+
+try:
+    from langgraph.graph import StateGraph
+
+    _LANGGRAPH_AVAILABLE = True
+except Exception:
+    _LANGGRAPH_AVAILABLE = False
+
+
+def _build_graph():
+    graph = StateGraph(GraphState)
+    graph.add_node("normalize_input", normalize_input)
+    graph.add_node("retrieve_evidence", retrieve_evidence)
+    graph.add_node("plan_tools", plan_tools)
+    graph.add_node("execute_tools", execute_tools)
+    graph.add_node("generate_final", generate_final)
+
+    graph.set_entry_point("normalize_input")
+    graph.add_edge("normalize_input", "retrieve_evidence")
+    graph.add_edge("retrieve_evidence", "plan_tools")
+
+    def _route_tools(state: GraphState):
+        return "execute_tools" if state.get("tool_plan") else "generate_final"
+
+    graph.add_conditional_edges("plan_tools", _route_tools)
+    graph.add_edge("execute_tools", "generate_final")
+    graph.set_finish_point("generate_final")
+    return graph.compile()
+
+
+_GRAPH = _build_graph() if _LANGGRAPH_AVAILABLE else None
+
+
+def run_graph(question: str, top_k: int = 5, filter: dict | None = None) -> dict:
+    state: GraphState = {"question": question, "top_k": top_k, "filter": filter}
+    if _GRAPH is not None:
+        result = _GRAPH.invoke(state)
+    else:
+        state = normalize_input(state)
+        state = retrieve_evidence(state)
+        state = plan_tools(state)
+        if state.get("tool_plan"):
+            state = execute_tools(state)
+        state = generate_final(state)
+        result = state
+
+    return {
+        "answer": result.get("answer", ""),
+        "citations": result.get("citations", []),
+        "used_context": result.get("used_context", result.get("used_context", [])),
+        "tool_results": result.get("tool_results", []),
+    }
