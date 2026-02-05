@@ -142,6 +142,15 @@ def run_interview_qa(
             if len(normalized) >= settings.max_citations:
                 break
     citations = normalized
+    if not citations and used_context:
+        top_ctx = used_context[0]
+        if isinstance(top_ctx, dict) and top_ctx.get("id"):
+            citations = [
+                {
+                    "id": top_ctx.get("id"),
+                    "quote": shorten_quote(_ensure_str(top_ctx.get("text", ""))),
+                }
+            ]
 
     return {
         "ok": True,

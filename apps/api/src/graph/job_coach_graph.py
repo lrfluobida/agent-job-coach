@@ -201,6 +201,15 @@ def generate_final(state: GraphState) -> GraphState:
         citations = state.get("citations", []) or []
         if not citations and marker_citations:
             citations = marker_citations
+        if not citations and state.get("used_context"):
+            top_ctx = state["used_context"][0]
+            if isinstance(top_ctx, dict) and top_ctx.get("id"):
+                citations = [
+                    {
+                        "id": top_ctx.get("id"),
+                        "quote": shorten_quote(top_ctx.get("text", "")),
+                    }
+                ]
 
         # Strip markers from final answer for display
         answer_clean = strip_citation_markers(state.get("answer", ""))
