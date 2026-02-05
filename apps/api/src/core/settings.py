@@ -21,6 +21,7 @@ class Settings(BaseModel):
     zhipu_timeout_s: float = 30.0
     zhipu_embed_model: str = "embedding-3"
     max_upload_mb: int = 10
+    max_citations: int = 3
 
 def get_settings() -> Settings:
     import os
@@ -45,4 +46,5 @@ def get_settings() -> Settings:
         zhipu_timeout_s=float(os.getenv("ZHIPUAI_TIMEOUT_S", "30")),
         zhipu_embed_model=os.getenv("ZHIPUAI_EMBED_MODEL", "embedding-3"),
         max_upload_mb=int(os.getenv("MAX_UPLOAD_MB", "10")),
+        max_citations=int(os.getenv("MAX_CITATIONS", "3")),
     )

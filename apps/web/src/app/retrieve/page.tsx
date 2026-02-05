@@ -1,6 +1,6 @@
 ﻿"use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 type RetrieveResult = {
   score?: number;
@@ -26,6 +26,76 @@ export default function RetrievePage() {
   const [err, setErr] = useState<string>("");
   const [banner, setBanner] = useState<string>("");
   const [loading, setLoading] = useState(false);
+  const hydratedRef = useRef(false);
+  const stateRef = useRef({
+    query: "",
+    topK: 5,
+    sourceType: "",
+    sourceId: "",
+    resp: null as RetrieveResponse | null,
+    raw: "",
+    err: "",
+    banner: "",
+  });
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("jobcoach_retrieve_state");
+      if (!saved) return;
+      const data = JSON.parse(saved) as {
+        query?: string;
+        topK?: number;
+        sourceType?: string;
+        sourceId?: string;
+        resp?: RetrieveResponse | null;
+        raw?: string;
+        err?: string;
+        banner?: string;
+      };
+      if (typeof data.query === "string") setQuery(data.query);
+      if (typeof data.topK === "number") setTopK(data.topK);
+      if (typeof data.sourceType === "string") setSourceType(data.sourceType);
+      if (typeof data.sourceId === "string") setSourceId(data.sourceId);
+      if (typeof data.raw === "string") setRaw(data.raw);
+      if (typeof data.err === "string") setErr(data.err);
+      if (typeof data.banner === "string") setBanner(data.banner);
+      if (data.resp) setResp(data.resp);
+    } catch {
+      // ignore corrupted cache
+    } finally {
+      hydratedRef.current = true;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!hydratedRef.current) return;
+    try {
+      const snapshot = {
+        query,
+        topK,
+        sourceType,
+        sourceId,
+        resp,
+        raw,
+        err,
+        banner,
+      };
+      stateRef.current = snapshot;
+      localStorage.setItem("jobcoach_retrieve_state", JSON.stringify(snapshot));
+    } catch {
+      // ignore storage errors
+    }
+  }, [query, topK, sourceType, sourceId, resp, raw, err, banner]);
+
+  useEffect(() => {
+    return () => {
+      try {
+        localStorage.setItem("jobcoach_retrieve_state", JSON.stringify(stateRef.current));
+      } catch {
+        // ignore storage errors
+      }
+    };
+  }, []);
 
   const onSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -107,13 +177,17 @@ export default function RetrievePage() {
           </div>
           <div>
             <label className="label">过滤 source_type</label>
-            <input
-              className="input"
+            <select
+              className="select"
               value={sourceType}
               onChange={(e) => setSourceType(e.target.value)}
-              placeholder="jd / resume / notes"
               style={{ marginTop: 8 }}
-            />
+            >
+              <option value="">不限</option>
+              <option value="jd">jd</option>
+              <option value="resume">resume</option>
+              <option value="note">note</option>
+            </select>
           </div>
         </div>
 

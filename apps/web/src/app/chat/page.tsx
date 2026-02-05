@@ -80,8 +80,43 @@ export default function ChatPage() {
   const evidenceRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const assistantIndexRef = useRef<number | null>(null);
   const streamControllerRef = useRef<AbortController | null>(null);
+  const hydratedRef = useRef(false);
+  const stateRef = useRef({
+    messages: [] as ChatMessage[],
+    input: "",
+    title: "新对话",
+    useUploadedOnly: false,
+  });
 
   const canSend = useMemo(() => input.trim().length > 0 && !loading, [input, loading]);
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("jobcoach_chat_state");
+      if (!saved) return;
+      const data = JSON.parse(saved) as {
+        messages?: ChatMessage[];
+        input?: string;
+        title?: string;
+        useUploadedOnly?: boolean;
+      };
+      if (Array.isArray(data.messages)) {
+        const restored = data.messages.map((msg) => ({
+          ...msg,
+          isStreaming: false,
+          stageText: msg.stage === "aborted" ? "已中断" : "",
+        }));
+        setMessages(restored);
+      }
+      if (typeof data.input === "string") setInput(data.input);
+      if (typeof data.title === "string") setTitle(data.title);
+      if (typeof data.useUploadedOnly === "boolean") setUseUploadedOnly(data.useUploadedOnly);
+    } catch {
+      // ignore corrupted cache
+    } finally {
+      hydratedRef.current = true;
+    }
+  }, []);
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
@@ -109,6 +144,32 @@ export default function ChatPage() {
       listRef.current.scrollTop = listRef.current.scrollHeight;
     }
   }, [messages, loading]);
+
+  useEffect(() => {
+    if (!hydratedRef.current) return;
+    try {
+      const snapshot = {
+        messages,
+        input,
+        title,
+        useUploadedOnly,
+      };
+      stateRef.current = snapshot;
+      localStorage.setItem("jobcoach_chat_state", JSON.stringify(snapshot));
+    } catch {
+      // ignore storage errors
+    }
+  }, [messages, input, title, useUploadedOnly]);
+
+  useEffect(() => {
+    return () => {
+      try {
+        localStorage.setItem("jobcoach_chat_state", JSON.stringify(stateRef.current));
+      } catch {
+        // ignore storage errors
+      }
+    };
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -402,7 +463,6 @@ export default function ChatPage() {
               className={`chat-bubble ${msg.role}`}
               style={{
                 maxWidth: "75%",
-                overflow: "hidden",
                 wordBreak: "break-word",
               }}
             >

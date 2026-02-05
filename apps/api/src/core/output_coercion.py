@@ -1,6 +1,6 @@
 ﻿import json
 import re
-from typing import Any, Tuple
+from typing import Tuple
 
 
 def strip_code_fence(text: str) -> str:
@@ -47,3 +47,17 @@ def shorten_quote(text: str, n: int = 120) -> str:
     if len(text) <= n:
         return text
     return text[:n] + "..."
+
+
+def extract_citation_markers(text: str) -> list[str]:
+    if not text:
+        return []
+    return list(dict.fromkeys(re.findall(r"\[@([^\]]+)\]", text)))
+
+
+def strip_citation_markers(text: str) -> str:
+    if not text:
+        return ""
+    cleaned = re.sub(r"\s*\[@[^\]]+\]", "", text)
+    cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    return cleaned.strip()

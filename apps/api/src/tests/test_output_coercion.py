@@ -9,7 +9,7 @@ def test_coerce_code_fenced_json():
 
 
 def test_coerce_leading_json_token():
-    text = '"json {"answer":"ok","citations":[]}'
+    text = '"json {\"answer\":\"ok\",\"citations\":[]}'
     answer, citations = coerce_model_output(text)
     assert answer == "ok"
     assert citations == []
