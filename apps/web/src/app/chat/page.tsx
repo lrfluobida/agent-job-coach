@@ -35,6 +35,22 @@ type InterviewQAResponse = {
   error?: string;
 };
 
+function normalizeCitations(input: unknown): Citation[] {
+  if (!Array.isArray(input)) return [];
+  const out: Citation[] = [];
+  for (const item of input) {
+    if (typeof item === "string") {
+      out.push({ id: item });
+    } else if (item && typeof item === "object") {
+      const maybe = item as Citation;
+      if (typeof maybe.id === "string" && maybe.id.length > 0) {
+        out.push(maybe);
+      }
+    }
+  }
+  return out;
+}
+
 function hasUnclosedFence(text: string) {
   const matches = text.match(/```/g);
   return (matches?.length ?? 0) % 2 === 1;
@@ -168,7 +184,7 @@ export default function ChatPage() {
       updateAssistant((prev) => ({
         ...prev,
         content: payload.answer ?? "",
-        citations: Array.isArray(payload.citations) ? payload.citations : [],
+        citations: normalizeCitations(payload.citations),
         used_context: Array.isArray(payload.used_context) ? payload.used_context : [],
         stage: "done",
         stageText: "",
@@ -284,7 +300,7 @@ export default function ChatPage() {
           } else if (event === "context") {
             updateAssistant((prev) => ({
               ...prev,
-              citations: Array.isArray(data.citations) ? data.citations : [],
+              citations: normalizeCitations(data.citations),
               used_context: Array.isArray(data.used_context) ? data.used_context : [],
             }));
           } else if (event === "done") {

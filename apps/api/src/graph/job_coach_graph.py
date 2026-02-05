@@ -1,14 +1,21 @@
 ﻿from __future__ import annotations
 
 import json
+import logging
 from typing import TypedDict
 
-from src.core.output_coercion import coerce_model_output, shorten_quote
+from src.core.output_coercion import (
+    coerce_model_output,
+    extract_citation_markers,
+    shorten_quote,
+    strip_citation_markers,
+)
 from src.core.settings import get_settings
 from src.llm.zhipu import chat
 from src.rag.service import retrieve
 from src.tools.registry import call_tool, get_tool_specs
 
+logger = logging.getLogger(__name__)
 
 class GraphState(TypedDict, total=False):
     question: str
@@ -35,6 +42,32 @@ def _build_where(filter_dict: dict | None) -> dict | None:
     return where or None
 
 
+def _normalize_citations(
+    citations: list[dict] | list[str] | None,
+    candidate_map: dict[str, dict],
+    max_citations: int,
+) -> list[dict]:
+    if not citations:
+        return []
+    normalized: list[dict] = []
+    for item in citations:
+        if isinstance(item, str):
+            ctx = candidate_map.get(item, {})
+            normalized.append({"id": item, "quote": shorten_quote(ctx.get("text", ""))})
+        elif isinstance(item, dict):
+            cid = item.get("id")
+            if not cid:
+                continue
+            quote = item.get("quote")
+            if not quote:
+                ctx = candidate_map.get(cid, {})
+                quote = ctx.get("text", "")
+            normalized.append({"id": cid, "quote": shorten_quote(quote or "")})
+        if len(normalized) >= max_citations:
+            break
+    return normalized
+
+
 def normalize_input(state: GraphState) -> GraphState:
     top_k = state.get("top_k", 5)
     top_k = max(1, min(20, int(top_k)))
@@ -46,7 +79,8 @@ def normalize_input(state: GraphState) -> GraphState:
 
 
 def retrieve_evidence(state: GraphState) -> GraphState:
-    results = retrieve(state.get("question", ""), top_k=state.get("top_k", 5), where=state.get("where"))
+    top_k = min(8, int(state.get("top_k", 5)))
+    results = retrieve(state.get("question", ""), top_k=top_k, where=state.get("where"))
     return {**state, "used_context": results}
 
 
@@ -113,8 +147,9 @@ def _generate_with_llm(state: GraphState) -> GraphState:
     used_context = state.get("used_context", [])
     evidence = "\n".join([f"[[{c['id']}]] {c.get('text', '')}" for c in used_context])
     prompt = (
-        "你是面试辅导助手，只能依据【证据块】回答，禁止编造。必须给出引用 chunk id。"
-        "只输出自然语言答案文本，不要输出 JSON，不要使用 ``` 代码块。"
+        "你是面试辅导助手，只能依据【证据块】回答，禁止编造。"
+        "输出必须是 Markdown 自然语言文本，不要输出 JSON，不要使用 ``` 代码块。"
+        "如果需要引用，请使用 [@chunk_id] 形式的标记（例如 [@resume_001:0]）。"
         "不要在答案里输出 citations 或 used_context。\n"
         f"问题：{state.get('question','')}\n【证据块】\n{evidence}"
     )
@@ -123,11 +158,6 @@ def _generate_with_llm(state: GraphState) -> GraphState:
     citations = state.get("citations", []) or []
     if not citations and extra_citations:
         citations = extra_citations
-    citations = [
-        {**c, "quote": shorten_quote(c.get("quote", ""))}
-        for c in citations
-        if isinstance(c, dict)
-    ]
     return {**state, "answer": answer, "citations": citations}
 
 
@@ -135,20 +165,55 @@ def generate_final(state: GraphState) -> GraphState:
     for item in state.get("tool_results", []):
         if item.get("name") == "skill_interview_qa":
             result = item.get("result", {})
+            answer_text = coerce_model_output(result.get("answer", ""))[0]
+            tool_citations = _normalize_citations(
+                result.get("citations", []),
+                {c.get("id"): c for c in result.get("used_context", []) if isinstance(c, dict)},
+                get_settings().max_citations,
+            )
+            logger.info("graph tool citations used: %s", len(tool_citations))
             return {
                 **state,
-                "answer": coerce_model_output(result.get("answer", ""))[0],
-                "citations": [
-                    {**c, "quote": shorten_quote(c.get("quote", ""))}
-                    for c in (result.get("citations", []) or [])
-                    if isinstance(c, dict)
-                ],
+                "answer": answer_text,
+                "citations": tool_citations,
                 "used_context": result.get("used_context", state.get("used_context", [])),
             }
 
     settings = get_settings()
     if settings.zhipu_api_key:
-        return _generate_with_llm(state)
+        state = _generate_with_llm(state)
+        # Use inline citation markers to build actual citations
+        markers = extract_citation_markers(state.get("answer", ""))
+        if markers:
+            logger.info("graph markers found: %s", len(markers))
+        max_citations = settings.max_citations
+        candidate_map = {c.get("id"): c for c in state.get("used_context", [])}
+        marker_citations = []
+        for marker in markers:
+            if marker in candidate_map:
+                ctx = candidate_map[marker]
+                marker_citations.append(
+                    {"id": marker, "quote": shorten_quote(ctx.get("text", ""))}
+                )
+            if len(marker_citations) >= max_citations:
+                break
+
+        citations = state.get("citations", []) or []
+        if not citations and marker_citations:
+            citations = marker_citations
+
+        # Strip markers from final answer for display
+        answer_clean = strip_citation_markers(state.get("answer", ""))
+        citations = _normalize_citations(citations, candidate_map, max_citations)
+
+        logger.info(
+            "graph citations: tool=%s markers=%s final=%s",
+            bool(state.get("citations")),
+            len(marker_citations),
+            len(citations),
+        )
+
+        return {**state, "answer": answer_clean, "citations": citations}
 
     # fallback without LLM
     used_context = state.get("used_context", [])

@@ -2,6 +2,7 @@
 import re
 
 from src.core.output_coercion import shorten_quote
+from src.core.settings import get_settings
 from src.llm.zhipu import chat
 from src.rag.service import retrieve
 from src.rag.store import count_collection
@@ -31,8 +32,10 @@ def _normalize_results(matches: list[dict]) -> list[dict]:
 
 def _build_prompt(question: str, contexts: list[dict]) -> list[dict]:
     system = (
-        "你是面试辅导助手，只能依据【证据块】回答，禁止编造。必须给出引用 chunk id。"
-        "输出必须是严格 JSON。"
+        "你是面试辅导助手，只能依据【证据块】回答，禁止编造。"
+        "请输出 Markdown 形式的自然语言回答。"
+        "如需引用证据，请在 citations 中返回，引用 chunk id。"
+        "输出严格 JSON，格式：{\"answer\":\"...\",\"citations\":[{\"id\":\"...\",\"quote\":\"...\"}]}。"
     )
 
     evidence_lines = []
@@ -118,19 +121,27 @@ def run_interview_qa(
         }
 
     answer = _ensure_str(data.get("answer", ""))
+    settings = get_settings()
     citations = data.get("citations", [])
+    candidate_map = {c.get("id"): c for c in used_context if isinstance(c, dict)}
+    normalized: list[dict] = []
     if isinstance(citations, list):
         for item in citations:
-            if isinstance(item, dict) and "quote" in item:
-                item["quote"] = shorten_quote(_ensure_str(item["quote"]))
-
-    if not citations and used_context:
-        citations = [
-            {
-                "id": used_context[0].get("id", ""),
-                "quote": shorten_quote(used_context[0].get("text", "")),
-            }
-        ]
+            if isinstance(item, str):
+                ctx = candidate_map.get(item, {})
+                normalized.append({"id": item, "quote": shorten_quote(ctx.get("text", ""))})
+            elif isinstance(item, dict):
+                cid = item.get("id")
+                if not cid:
+                    continue
+                quote = item.get("quote")
+                if not quote:
+                    ctx = candidate_map.get(cid, {})
+                    quote = ctx.get("text", "")
+                normalized.append({"id": cid, "quote": shorten_quote(_ensure_str(quote or ""))})
+            if len(normalized) >= settings.max_citations:
+                break
+    citations = normalized
 
     return {
         "ok": True,

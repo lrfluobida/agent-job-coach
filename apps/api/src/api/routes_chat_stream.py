@@ -41,14 +41,26 @@ async def chat_stream(payload: ChatStreamRequest):
                 await asyncio.sleep(0.01)
 
             yield _sse_event("status", {"stage": "finalize", "message": "整理引用..."})
+            candidate_map = {
+                c.get("id"): c
+                for c in (result.get("used_context", []) or [])
+                if isinstance(c, dict)
+            }
+            citations: list[dict] = []
+            for item in (result.get("citations", []) or []):
+                if isinstance(item, str):
+                    ctx = candidate_map.get(item, {})
+                    citations.append({"id": item, "quote": shorten_quote(ctx.get("text", ""))})
+                elif isinstance(item, dict):
+                    cid = item.get("id")
+                    if not cid:
+                        continue
+                    quote = item.get("quote") or candidate_map.get(cid, {}).get("text", "")
+                    citations.append({"id": cid, "quote": shorten_quote(quote)})
             yield _sse_event(
                 "context",
                 {
-                    "citations": [
-                        {**c, "quote": shorten_quote(c.get("quote", ""))}
-                        for c in (result.get("citations", []) or [])
-                        if isinstance(c, dict)
-                    ],
+                    "citations": citations,
                     "used_context": result.get("used_context", []),
                 },
             )

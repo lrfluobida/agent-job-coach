@@ -23,11 +23,20 @@ def chat_ping():
 def chat(payload: ChatRequest):
     result = run_graph(payload.question, top_k=payload.top_k, filter=payload.filter)
     answer, _ = coerce_model_output(result.get("answer", ""))
-    citations = [
-        {**c, "quote": shorten_quote(c.get("quote", ""))}
-        for c in (result.get("citations", []) or [])
-        if isinstance(c, dict)
-    ]
+    candidate_map = {
+        c.get("id"): c for c in (result.get("used_context", []) or []) if isinstance(c, dict)
+    }
+    citations: list[dict] = []
+    for item in (result.get("citations", []) or []):
+        if isinstance(item, str):
+            ctx = candidate_map.get(item, {})
+            citations.append({"id": item, "quote": shorten_quote(ctx.get("text", ""))})
+        elif isinstance(item, dict):
+            cid = item.get("id")
+            if not cid:
+                continue
+            quote = item.get("quote") or candidate_map.get(cid, {}).get("text", "")
+            citations.append({"id": cid, "quote": shorten_quote(quote)})
     return {
         "ok": True,
         "answer": answer,
