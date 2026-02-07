@@ -1,6 +1,5 @@
 ﻿from __future__ import annotations
 
-import json
 import logging
 from typing import TypedDict
 
@@ -13,7 +12,7 @@ from src.core.output_coercion import (
 from src.core.settings import get_settings
 from src.llm.zhipu import chat
 from src.rag.service import retrieve
-from src.tools.registry import call_tool, get_tool_specs
+from src.tools.registry import call_tool
 
 logger = logging.getLogger(__name__)
 
@@ -84,43 +83,10 @@ def retrieve_evidence(state: GraphState) -> GraphState:
     return {**state, "used_context": results}
 
 
-def _plan_with_llm(question: str, tool_specs: list[dict]) -> list[dict]:
-    prompt = {
-        "role": "user",
-        "content": (
-            "你是工具规划器。只能从提供的工具列表中选择。\n"
-            "输出严格 JSON，格式：{\"tool_plan\":[{\"name\":\"...\",\"args\":{...}}]}。\n"
-            f"问题：{question}\n工具列表：{json.dumps(tool_specs, ensure_ascii=False)}"
-        ),
-    }
-    content = chat([prompt])
-    try:
-        data = json.loads(content)
-        plan = data.get("tool_plan", [])
-        return plan if isinstance(plan, list) else []
-    except Exception:
-        return []
-
-
 def plan_tools(state: GraphState) -> GraphState:
     question = state.get("question", "")
-    tool_specs = [
-        {
-            "name": t.name,
-            "description": t.description,
-            "json_schema": t.json_schema,
-        }
-        for t in get_tool_specs()
-    ]
-
-    settings = get_settings()
-    if settings.zhipu_api_key:
-        plan = _plan_with_llm(question, tool_specs)
-        allowed = {t["name"] for t in tool_specs}
-        plan = [p for p in plan if isinstance(p, dict) and p.get("name") in allowed]
-        return {**state, "tool_plan": plan}
-
-    keywords = ["面试", "自我介绍", "项目", "如何回答", "怎么说"]
+    # Fast path: avoid planner LLM round-trip; use deterministic routing.
+    keywords = ["面试", "自我介绍", "项目", "如何回答", "怎么说", "行为面", "八股", "追问"]
     if any(k in question for k in keywords):
         return {
             **state,
@@ -134,12 +100,13 @@ def plan_tools(state: GraphState) -> GraphState:
 def execute_tools(state: GraphState) -> GraphState:
     tool_plan = state.get("tool_plan", [])
     results = []
+    context = {"used_context": state.get("used_context", [])}
     for item in tool_plan:
         name = item.get("name")
         args = item.get("args") or {}
         if not name:
             continue
-        results.append({"name": name, "result": call_tool(name, args, context={})})
+        results.append({"name": name, "result": call_tool(name, args, context=context)})
     return {**state, "tool_results": results}
 
 
@@ -286,3 +253,4 @@ def run_graph(question: str, top_k: int = 5, filter: dict | None = None) -> dict
         "used_context": result.get("used_context", result.get("used_context", [])),
         "tool_results": result.get("tool_results", []),
     }
+

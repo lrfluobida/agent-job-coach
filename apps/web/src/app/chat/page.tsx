@@ -27,14 +27,6 @@ type UsedContext = {
   score?: number;
 };
 
-type InterviewQAResponse = {
-  ok?: boolean;
-  answer?: string;
-  citations?: Citation[];
-  used_context?: UsedContext[];
-  error?: string;
-};
-
 function normalizeCitations(input: unknown): Citation[] {
   if (!Array.isArray(input)) return [];
   const out: Citation[] = [];
@@ -63,11 +55,19 @@ function makeTitle(text: string) {
   return `${trimmed.slice(0, maxLen)}...`;
 }
 
+function getErrorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  return String(err);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
 export default function ChatPage() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [banner, setBanner] = useState("");
   const [err, setErr] = useState("");
   const [title, setTitle] = useState("新对话");
   const [openEvidenceIndex, setOpenEvidenceIndex] = useState<number | null>(null);
@@ -75,18 +75,12 @@ export default function ChatPage() {
   const [expandedMeta, setExpandedMeta] = useState<Record<string, boolean>>({});
   const [uploadedSourceId, setUploadedSourceId] = useState<string | null>(null);
   const [useUploadedOnly, setUseUploadedOnly] = useState(false);
+  const [hydrated, setHydrated] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const evidenceRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const assistantIndexRef = useRef<number | null>(null);
   const streamControllerRef = useRef<AbortController | null>(null);
-  const hydratedRef = useRef(false);
-  const stateRef = useRef({
-    messages: [] as ChatMessage[],
-    input: "",
-    title: "新对话",
-    useUploadedOnly: false,
-  });
 
   const canSend = useMemo(() => input.trim().length > 0 && !loading, [input, loading]);
 
@@ -114,7 +108,7 @@ export default function ChatPage() {
     } catch {
       // ignore corrupted cache
     } finally {
-      hydratedRef.current = true;
+      setHydrated(true);
     }
   }, []);
 
@@ -146,7 +140,7 @@ export default function ChatPage() {
   }, [messages, loading]);
 
   useEffect(() => {
-    if (!hydratedRef.current) return;
+    if (!hydrated) return;
     try {
       const snapshot = {
         messages,
@@ -154,22 +148,11 @@ export default function ChatPage() {
         title,
         useUploadedOnly,
       };
-      stateRef.current = snapshot;
       localStorage.setItem("jobcoach_chat_state", JSON.stringify(snapshot));
     } catch {
       // ignore storage errors
     }
-  }, [messages, input, title, useUploadedOnly]);
-
-  useEffect(() => {
-    return () => {
-      try {
-        localStorage.setItem("jobcoach_chat_state", JSON.stringify(stateRef.current));
-      } catch {
-        // ignore storage errors
-      }
-    };
-  }, []);
+  }, [messages, input, title, useUploadedOnly, hydrated]);
 
   useEffect(() => {
     return () => {
@@ -202,60 +185,6 @@ export default function ChatPage() {
     }
   };
 
-  const runNonStream = async (question: string, filter: Record<string, unknown> | null) => {
-    try {
-      const res = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ message: question, filter }),
-      });
-
-      const bodyText = await res.text();
-      if (res.status === 404) {
-        setBanner("聊天接口暂未实现，请先在后端添加 /chat 后再使用本页面。");
-        return;
-      }
-      if (!res.ok) {
-        throw new Error(bodyText || `HTTP ${res.status}`);
-      }
-
-      let payload: InterviewQAResponse | null = null;
-      try {
-        const json = JSON.parse(bodyText) as InterviewQAResponse;
-        if (typeof json.answer === "string") {
-          payload = json;
-        } else {
-          console.warn("聊天接口返回缺少 answer 字段", json);
-        }
-      } catch (err) {
-        console.warn("聊天接口返回非 JSON：", bodyText, err);
-      }
-
-      if (!payload) {
-        updateAssistant((prev) => ({
-          ...prev,
-          content: "抱歉，助手返回的数据解析失败，请稍后重试。",
-          stage: "error",
-          stageText: "出错",
-          isStreaming: false,
-        }));
-        return;
-      }
-
-      updateAssistant((prev) => ({
-        ...prev,
-        content: payload.answer ?? "",
-        citations: normalizeCitations(payload.citations),
-        used_context: Array.isArray(payload.used_context) ? payload.used_context : [],
-        stage: "done",
-        stageText: "",
-        isStreaming: false,
-      }));
-    } catch (e: any) {
-      setErr(e?.message ?? String(e));
-    }
-  };
-
   const sendMessage = async () => {
     if (!canSend) return;
 
@@ -267,7 +196,6 @@ export default function ChatPage() {
     setMessages((prev) => [...prev, userMessage]);
     setInput("");
     setLoading(true);
-    setBanner("");
     setErr("");
 
     if (messages.length === 0) {
@@ -302,10 +230,7 @@ export default function ChatPage() {
         signal: controller.signal,
       });
 
-      if (!res.ok || !res.body) {
-        await runNonStream(userMessage.content, filter);
-        return;
-      }
+      if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder("utf-8");
@@ -332,12 +257,13 @@ export default function ChatPage() {
           const dataStr = dataLines.join("\n");
           if (!dataStr) continue;
 
-          let data: any;
+          let data: unknown;
           try {
             data = JSON.parse(dataStr);
           } catch {
             continue;
           }
+          if (!isRecord(data)) continue;
 
           if (event === "status") {
             const stageMap: Record<string, string> = {
@@ -345,17 +271,20 @@ export default function ChatPage() {
               generate: "正在组织回答...",
               finalize: "正在整理引用...",
             };
-            const mapped = stageMap[data.stage] ?? data.message;
+            const stage = typeof data.stage === "string" ? data.stage : undefined;
+            const message = typeof data.message === "string" ? data.message : undefined;
+            const mapped = (stage ? stageMap[stage] : undefined) ?? message;
             updateAssistant((prev) => ({
               ...prev,
-              stage: data.stage ?? prev.stage,
+              stage: stage ?? prev.stage,
               stageText: mapped ?? prev.stageText,
               isStreaming: true,
             }));
           } else if (event === "token") {
+            const delta = typeof data.delta === "string" ? data.delta : "";
             updateAssistant((prev) => ({
               ...prev,
-              content: `${prev.content}${data.delta ?? ""}`,
+              content: `${prev.content}${delta}`,
               isStreaming: true,
             }));
           } else if (event === "context") {
@@ -389,9 +318,17 @@ export default function ChatPage() {
           }
         }
       }
-    } catch (e: any) {
-      if (e?.name !== "AbortError") {
-        await runNonStream(userMessage.content, filter);
+    } catch (e: unknown) {
+      if (!(e instanceof DOMException && e.name === "AbortError")) {
+        const message = getErrorMessage(e);
+        setErr(message);
+        updateAssistant((prev) => ({
+          ...prev,
+          content: `抱歉，流式生成失败：${message}`,
+          stage: "error",
+          stageText: "出错",
+          isStreaming: false,
+        }));
       }
     } finally {
       setLoading(false);
@@ -447,7 +384,6 @@ export default function ChatPage() {
         </div>
       </div>
 
-      {banner && <div className="banner" style={{ marginBottom: 16 }}>{banner}</div>}
       {err && <div className="banner" style={{ marginBottom: 16 }}>{err}</div>}
 
       <div className="panel" style={{ padding: 20 }}>

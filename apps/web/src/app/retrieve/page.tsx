@@ -1,6 +1,6 @@
 ﻿"use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 
 type RetrieveResult = {
   score?: number;
@@ -16,6 +16,11 @@ type RetrieveResponse = {
   error?: string;
 };
 
+function getErrorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  return String(err);
+}
+
 export default function RetrievePage() {
   const [query, setQuery] = useState("");
   const [topK, setTopK] = useState(5);
@@ -26,17 +31,7 @@ export default function RetrievePage() {
   const [err, setErr] = useState<string>("");
   const [banner, setBanner] = useState<string>("");
   const [loading, setLoading] = useState(false);
-  const hydratedRef = useRef(false);
-  const stateRef = useRef({
-    query: "",
-    topK: 5,
-    sourceType: "",
-    sourceId: "",
-    resp: null as RetrieveResponse | null,
-    raw: "",
-    err: "",
-    banner: "",
-  });
+  const [hydrated, setHydrated] = useState(false);
 
   useEffect(() => {
     try {
@@ -63,12 +58,12 @@ export default function RetrievePage() {
     } catch {
       // ignore corrupted cache
     } finally {
-      hydratedRef.current = true;
+      setHydrated(true);
     }
   }, []);
 
   useEffect(() => {
-    if (!hydratedRef.current) return;
+    if (!hydrated) return;
     try {
       const snapshot = {
         query,
@@ -80,22 +75,11 @@ export default function RetrievePage() {
         err,
         banner,
       };
-      stateRef.current = snapshot;
       localStorage.setItem("jobcoach_retrieve_state", JSON.stringify(snapshot));
     } catch {
       // ignore storage errors
     }
-  }, [query, topK, sourceType, sourceId, resp, raw, err, banner]);
-
-  useEffect(() => {
-    return () => {
-      try {
-        localStorage.setItem("jobcoach_retrieve_state", JSON.stringify(stateRef.current));
-      } catch {
-        // ignore storage errors
-      }
-    };
-  }, []);
+  }, [query, topK, sourceType, sourceId, resp, raw, err, banner, hydrated]);
 
   const onSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -131,8 +115,8 @@ export default function RetrievePage() {
       setRaw(bodyText);
       const json = JSON.parse(bodyText) as RetrieveResponse;
       setResp(json);
-    } catch (e: any) {
-      setErr(e?.message ?? String(e));
+    } catch (e: unknown) {
+      setErr(getErrorMessage(e));
     } finally {
       setLoading(false);
     }

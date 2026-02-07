@@ -14,8 +14,8 @@ def test_chat_graph_smoke():
     assert resp.status_code == 200
 
     chat = {"question": "黑马点评如何防止超卖？", "top_k": 3, "filter": {"source_type": "resume"}}
-    resp = client.post("/chat", json=chat)
+    resp = client.post("/chat/stream", json=chat)
     assert resp.status_code == 200
-    data = resp.json()
-    assert data.get("ok") is True
-    assert isinstance(data.get("answer"), str)
+    text = resp.text
+    assert "event: done" in text
+    assert "event: token" in text

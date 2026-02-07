@@ -1,5 +1,4 @@
-﻿import asyncio
-import json
+﻿import json
 
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
@@ -23,7 +22,7 @@ def _sse_event(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {payload}\n\n"
 
 
-def _chunk_text(text: str, size: int = 18) -> list[str]:
+def _chunk_text(text: str, size: int = 48) -> list[str]:
     return [text[i : i + size] for i in range(0, len(text), size)]
 
 
@@ -38,7 +37,6 @@ async def chat_stream(payload: ChatStreamRequest):
             answer, _ = coerce_model_output(result.get("answer", ""))
             for chunk in _chunk_text(answer):
                 yield _sse_event("token", {"delta": chunk})
-                await asyncio.sleep(0.01)
 
             yield _sse_event("status", {"stage": "finalize", "message": "整理引用..."})
             candidate_map = {
@@ -65,8 +63,6 @@ async def chat_stream(payload: ChatStreamRequest):
                 },
             )
             yield _sse_event("done", {"ok": True})
-        except asyncio.CancelledError:
-            return
         except Exception as exc:
             yield _sse_event("error", {"ok": False, "error": str(exc)})
 
@@ -80,3 +76,4 @@ async def chat_stream(payload: ChatStreamRequest):
         media_type="text/event-stream; charset=utf-8",
         headers=headers,
     )
+

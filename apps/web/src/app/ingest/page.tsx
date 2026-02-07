@@ -12,21 +12,18 @@ type IngestResponse = {
 
 export default function IngestPage() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const [uploading, setUploading] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<string>("");
   const [sourceType, setSourceType] = useState("jd");
   const [text, setText] = useState("");
   const [resp, setResp] = useState<IngestResponse | null>(null);
   const [err, setErr] = useState<string>("");
   const [loading, setLoading] = useState(false);
-  const hydratedRef = useRef(false);
-  const stateRef = useRef({
-    sourceType: "jd",
-    text: "",
-    uploadStatus: "",
-    resp: null as IngestResponse | null,
-    err: "",
-  });
+  const [hydrated, setHydrated] = useState(false);
+
+  const getErrorMessage = (e: unknown) => {
+    if (e instanceof Error) return e.message;
+    return String(e);
+  };
 
   useEffect(() => {
     try {
@@ -47,12 +44,12 @@ export default function IngestPage() {
     } catch {
       // ignore corrupted cache
     } finally {
-      hydratedRef.current = true;
+      setHydrated(true);
     }
   }, []);
 
   useEffect(() => {
-    if (!hydratedRef.current) return;
+    if (!hydrated) return;
     try {
       const snapshot = {
         sourceType,
@@ -61,22 +58,11 @@ export default function IngestPage() {
         resp,
         err,
       };
-      stateRef.current = snapshot;
       localStorage.setItem("jobcoach_ingest_state", JSON.stringify(snapshot));
     } catch {
       // ignore storage errors
     }
-  }, [sourceType, text, uploadStatus, resp, err]);
-
-  useEffect(() => {
-    return () => {
-      try {
-        localStorage.setItem("jobcoach_ingest_state", JSON.stringify(stateRef.current));
-      } catch {
-        // ignore storage errors
-      }
-    };
-  }, []);
+  }, [sourceType, text, uploadStatus, resp, err, hydrated]);
 
   const onSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -88,7 +74,6 @@ export default function IngestPage() {
     try {
       const file = fileInputRef.current?.files?.[0];
       if (file) {
-        setUploading(true);
         const form = new FormData();
         form.append("file", file);
         form.append("source_type", sourceType);
@@ -127,11 +112,10 @@ export default function IngestPage() {
       }
       const json = JSON.parse(bodyText) as IngestResponse;
       setResp(json);
-    } catch (e: any) {
-      setErr(e?.message ?? String(e));
+    } catch (e: unknown) {
+      setErr(getErrorMessage(e));
     } finally {
       setLoading(false);
-      setUploading(false);
     }
   };
 

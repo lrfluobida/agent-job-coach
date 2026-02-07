@@ -7,6 +7,11 @@ type HealthResp = {
   chroma_path?: string;
 };
 
+function getErrorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  return String(err);
+}
+
 export default function Home() {
   const [status, setStatus] = useState<"loading" | "ok" | "fail">("loading");
   const [data, setData] = useState<HealthResp | null>(null);
@@ -21,9 +26,9 @@ export default function Home() {
         const json = JSON.parse(text) as HealthResp;
         setData(json);
         setStatus(json.ok ? "ok" : "fail");
-      } catch (e: any) {
+      } catch (e: unknown) {
         setStatus("fail");
-        setErr(e?.message ?? String(e));
+        setErr(getErrorMessage(e));
       }
     };
     run();

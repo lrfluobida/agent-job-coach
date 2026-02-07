@@ -2,6 +2,8 @@
 
 from dataclasses import dataclass
 import logging
+import os
+import time
 
 from src.ingest.pipeline import ingest_text
 from src.rag.service import retrieve
@@ -10,6 +12,16 @@ from src.tools.mcp_client import mcp_call_tool, mcp_list_tools
 import hashlib
 
 logger = logging.getLogger(__name__)
+
+_TOOL_SPECS_CACHE: list["ToolSpec"] | None = None
+_TOOL_SPECS_CACHE_AT: float = 0.0
+
+
+def _tool_specs_ttl_s() -> float:
+    try:
+        return float(os.getenv("TOOL_SPECS_CACHE_TTL_S", "30"))
+    except Exception:
+        return 30.0
 
 
 @dataclass(frozen=True)
@@ -77,7 +89,16 @@ def _mcp_tools() -> list[ToolSpec]:
 
 
 def get_tool_specs() -> list[ToolSpec]:
-    return _builtin_tools() + _mcp_tools()
+    global _TOOL_SPECS_CACHE, _TOOL_SPECS_CACHE_AT
+    now = time.time()
+    ttl = _tool_specs_ttl_s()
+    if _TOOL_SPECS_CACHE is not None and (now - _TOOL_SPECS_CACHE_AT) < ttl:
+        return _TOOL_SPECS_CACHE
+
+    specs = _builtin_tools() + _mcp_tools()
+    _TOOL_SPECS_CACHE = specs
+    _TOOL_SPECS_CACHE_AT = now
+    return specs
 
 
 def call_tool(name: str, args: dict, *, context: dict | None = None) -> dict:
@@ -98,6 +119,7 @@ def call_tool(name: str, args: dict, *, context: dict | None = None) -> dict:
             args.get("question", ""),
             top_k=int(args.get("top_k", 5)),
             where=where,
+            used_context=context.get("used_context"),
         )
     if name == "rag_retrieve":
         where = None
@@ -129,3 +151,4 @@ def call_tool(name: str, args: dict, *, context: dict | None = None) -> dict:
         return mcp_call_tool(name.split(":", 1)[1], args)
 
     return {"ok": False, "error": f"Unknown tool: {name}"}
+

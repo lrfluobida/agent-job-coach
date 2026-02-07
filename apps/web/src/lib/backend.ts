@@ -11,6 +11,11 @@ function jsonError(message: string, status = 502): Response {
   });
 }
 
+function getErrorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  return String(err);
+}
+
 export async function proxyToBackend(
   path: string,
   init: RequestInit = {},
@@ -31,7 +36,7 @@ export async function proxyToBackend(
       status: response.status,
       headers: { "content-type": contentType },
     });
-  } catch (err: any) {
-    return jsonError(err?.message ?? "Unable to reach backend", 502);
+  } catch (err: unknown) {
+    return jsonError(getErrorMessage(err), 502);
   }
 }

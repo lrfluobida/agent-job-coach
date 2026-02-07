@@ -22,6 +22,8 @@ class Settings(BaseModel):
     zhipu_embed_model: str = "embedding-3"
     max_upload_mb: int = 10
     max_citations: int = 3
+    filesystem_sync_enabled: bool = True
+    filesystem_sync_interval_s: float = 5.0
 
 def get_settings() -> Settings:
     import os
@@ -47,4 +49,6 @@ def get_settings() -> Settings:
         zhipu_embed_model=os.getenv("ZHIPUAI_EMBED_MODEL", "embedding-3"),
         max_upload_mb=int(os.getenv("MAX_UPLOAD_MB", "10")),
         max_citations=int(os.getenv("MAX_CITATIONS", "3")),
+        filesystem_sync_enabled=os.getenv("FILESYSTEM_SYNC_ENABLED", "true").lower() in {"1", "true", "yes", "on"},
+        filesystem_sync_interval_s=float(os.getenv("FILESYSTEM_SYNC_INTERVAL_S", "5")),
     )

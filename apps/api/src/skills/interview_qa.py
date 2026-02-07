@@ -85,6 +85,7 @@ def run_interview_qa(
     question: str,
     top_k: int = 5,
     where: dict | None = None,
+    used_context: list[dict] | None = None,
 ) -> dict:
     if count_collection() == 0:
         return {
@@ -94,7 +95,8 @@ def run_interview_qa(
             "used_context": [],
         }
 
-    used_context = retrieve_context(question, top_k=top_k, where=where)
+    if used_context is None:
+        used_context = retrieve_context(question, top_k=top_k, where=where)
 
     if not used_context:
         return {
