@@ -1,7 +1,7 @@
 ﻿"use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 
 const links = [
   { href: "/", label: "首页" },
@@ -12,6 +12,21 @@ const links = [
 
 export default function Sidebar({ open, onClose }: { open: boolean; onClose: () => void }) {
   const pathname = usePathname();
+  const router = useRouter();
+
+  const handleNewChat = () => {
+    try {
+      localStorage.removeItem("jobcoach_chat_state");
+      window.dispatchEvent(new CustomEvent("jobcoach:new-chat"));
+    } catch {
+      // ignore storage errors
+    }
+
+    if (pathname !== "/chat") {
+      router.push("/chat");
+    }
+    onClose();
+  };
 
   return (
     <aside className={`sidebar ${open ? "open" : ""}`}>
@@ -37,7 +52,9 @@ export default function Sidebar({ open, onClose }: { open: boolean; onClose: () 
 
       <div className="sidebar-section">
         <div className="label">历史记录</div>
-        <div className="history-item">新对话</div>
+        <button type="button" className="history-item history-item-button" onClick={handleNewChat}>
+          新对话
+        </button>
         <div className="history-item">简历优化草案</div>
         <div className="history-item">岗位匹配建议</div>
       </div>

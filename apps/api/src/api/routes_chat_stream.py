@@ -15,6 +15,11 @@ class ChatStreamRequest(BaseModel):
     question: str
     top_k: int = Field(default=5, ge=1, le=20)
     filter: dict | None = None
+    history: list = Field(default_factory=list)
+    topic: str | None = None
+    mode: str | None = None
+    active_source_id: str | None = None
+    active_source_type: str | None = None
 
 
 def _sse_event(event: str, data: dict) -> str:
@@ -32,7 +37,14 @@ async def chat_stream(payload: ChatStreamRequest):
         try:
             yield _sse_event("status", {"stage": "retrieve", "message": "检索中..."})
             yield _sse_event("status", {"stage": "generate", "message": "生成回答..."})
-            result = run_graph(payload.question, top_k=payload.top_k, filter=payload.filter)
+            history = list(payload.history or [])
+            session = {
+                "mode": payload.mode or "chat",
+                "active_source_id": payload.active_source_id,
+                "active_source_type": payload.active_source_type,
+            }
+            history.insert(0, {"role": "system", "content": f"__SESSION__:{json.dumps(session, ensure_ascii=False)}"})
+            result = run_graph(payload.question, history)
 
             answer, _ = coerce_model_output(result.get("answer", ""))
             for chunk in _chunk_text(answer):

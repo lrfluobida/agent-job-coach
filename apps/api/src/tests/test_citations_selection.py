@@ -1,55 +1,21 @@
-﻿from types import SimpleNamespace
-
 from src.graph import job_coach_graph
+from src.skills import interview_qa
 
 
-def test_citations_selection_from_markers(monkeypatch):
-    def fake_chat(messages):
-        return "回答内容 [@resume_001:0] 其他内容"
+def test_graph_calls_interview_tool(monkeypatch):
+    def fake_router_chat(messages):
+        return (
+            '{"action":"tool","name":"run_interview_turn",'
+            '"args":{"user_input":"Redis 是单线程的。","history":[],"topic":"Redis"}}'
+        )
 
-    def fake_retrieve(*args, **kwargs):
-        return [
-            {"id": "resume_001:0", "text": "证据内容", "metadata": {}, "score": 0.1},
-            {"id": "resume_001:1", "text": "无关内容", "metadata": {}, "score": 0.2},
-        ]
+    def fake_interview_chat(messages):
+        return "**基本正确。** Redis 6.0 引入了多线程 I/O，你能解释它解决了什么问题吗？"
 
-    monkeypatch.setattr(job_coach_graph, "chat", fake_chat)
-    monkeypatch.setattr(job_coach_graph, "retrieve", fake_retrieve)
-    monkeypatch.setattr(job_coach_graph, "get_settings", lambda: SimpleNamespace(zhipu_api_key="x", max_citations=3))
+    monkeypatch.setattr(job_coach_graph, "chat", fake_router_chat)
+    monkeypatch.setattr(interview_qa, "chat", fake_interview_chat)
 
-    result = job_coach_graph.run_graph("测试问题", top_k=5, filter=None)
-    assert result.get("answer") == "回答内容 其他内容"
-    assert len(result.get("citations", [])) == 1
-    assert result.get("citations")[0].get("id") == "resume_001:0"
-
-
-def test_tool_citations_preserved(monkeypatch):
-    state = {
-        "tool_results": [
-            {
-                "name": "skill_interview_qa",
-                "result": {
-                    "answer": "答案",
-                    "citations": ["resume_001:0"],
-                    "used_context": [
-                        {
-                            "id": "resume_001:0",
-                            "text": "证据内容",
-                            "metadata": {},
-                            "score": 0.1,
-                        }
-                    ],
-                },
-            }
-        ]
-    }
-
-    monkeypatch.setattr(
-        job_coach_graph,
-        "get_settings",
-        lambda: SimpleNamespace(zhipu_api_key="x", max_citations=3),
-    )
-
-    result = job_coach_graph.generate_final(state)
-    assert len(result.get("citations", [])) == 1
-    assert result.get("citations")[0].get("id") == "resume_001:0"
+    result = job_coach_graph.run_graph("Redis 是单线程的。", history=[])
+    assert "Redis 6.0" in result.get("answer", "")
+    assert len(result.get("tool_results", [])) == 1
+    assert result.get("tool_results", [])[0].get("name") == "run_interview_turn"

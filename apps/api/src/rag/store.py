@@ -52,3 +52,21 @@ def query_collection(
         where=where,
         include=["documents", "metadatas", "distances"],
     )
+
+
+def find_source_id_by_content_hash(*, source_type: str, content_sha256: str) -> str | None:
+    collection = get_collection()
+    raw = collection.get(
+        where={"content_sha256": content_sha256},
+        include=["metadatas"],
+    )
+    metadatas = raw.get("metadatas") or []
+    for meta in metadatas:
+        if not isinstance(meta, dict):
+            continue
+        if meta.get("source_type") != source_type:
+            continue
+        source_id = meta.get("source_id")
+        if isinstance(source_id, str) and source_id:
+            return source_id
+    return None

@@ -1,7 +1,6 @@
 ﻿"use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import Link from "next/link";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -26,6 +25,14 @@ type UsedContext = {
   metadata?: Record<string, unknown>;
   score?: number;
 };
+
+type UploadSourceType = "resume" | "jd" | "note";
+
+type ActiveSource = {
+  source_id: string;
+  source_type: UploadSourceType;
+  filename: string;
+} | null;
 
 function normalizeCitations(input: unknown): Citation[] {
   if (!Array.isArray(input)) return [];
@@ -73,14 +80,33 @@ export default function ChatPage() {
   const [openEvidenceIndex, setOpenEvidenceIndex] = useState<number | null>(null);
   const [expandedEvidence, setExpandedEvidence] = useState<Record<string, boolean>>({});
   const [expandedMeta, setExpandedMeta] = useState<Record<string, boolean>>({});
-  const [uploadedSourceId, setUploadedSourceId] = useState<string | null>(null);
-  const [useUploadedOnly, setUseUploadedOnly] = useState(false);
+  const [uploadType, setUploadType] = useState<UploadSourceType>("resume");
+  const [uploading, setUploading] = useState(false);
+  const [activeSource, setActiveSource] = useState<ActiveSource>(null);
+  const [mode, setMode] = useState<"chat" | "resume_interview">("chat");
   const [hydrated, setHydrated] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const evidenceRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const assistantIndexRef = useRef<number | null>(null);
   const streamControllerRef = useRef<AbortController | null>(null);
+
+  const resetChat = useCallback(() => {
+    streamControllerRef.current?.abort();
+    streamControllerRef.current = null;
+    assistantIndexRef.current = null;
+    setMessages([]);
+    setInput("");
+    setLoading(false);
+    setErr("");
+    setTitle("新对话");
+    setOpenEvidenceIndex(null);
+    setExpandedEvidence({});
+    setExpandedMeta({});
+    setMode("chat");
+    setActiveSource(null);
+  }, []);
 
   const canSend = useMemo(() => input.trim().length > 0 && !loading, [input, loading]);
 
@@ -92,7 +118,9 @@ export default function ChatPage() {
         messages?: ChatMessage[];
         input?: string;
         title?: string;
-        useUploadedOnly?: boolean;
+        uploadType?: UploadSourceType;
+        activeSource?: ActiveSource;
+        mode?: "chat" | "resume_interview";
       };
       if (Array.isArray(data.messages)) {
         const restored = data.messages.map((msg) => ({
@@ -104,7 +132,21 @@ export default function ChatPage() {
       }
       if (typeof data.input === "string") setInput(data.input);
       if (typeof data.title === "string") setTitle(data.title);
-      if (typeof data.useUploadedOnly === "boolean") setUseUploadedOnly(data.useUploadedOnly);
+      if (data.uploadType === "resume" || data.uploadType === "jd" || data.uploadType === "note") {
+        setUploadType(data.uploadType);
+      }
+      if (
+        data.activeSource &&
+        typeof data.activeSource.source_id === "string" &&
+        (data.activeSource.source_type === "resume" ||
+          data.activeSource.source_type === "jd" ||
+          data.activeSource.source_type === "note")
+      ) {
+        setActiveSource(data.activeSource);
+      }
+      if (data.mode === "chat" || data.mode === "resume_interview") {
+        setMode(data.mode);
+      }
     } catch {
       // ignore corrupted cache
     } finally {
@@ -127,13 +169,6 @@ export default function ChatPage() {
   }, []);
 
   useEffect(() => {
-    const saved = localStorage.getItem("jobcoach_last_source_id");
-    if (saved) {
-      setUploadedSourceId(saved);
-    }
-  }, []);
-
-  useEffect(() => {
     if (listRef.current) {
       listRef.current.scrollTop = listRef.current.scrollHeight;
     }
@@ -146,19 +181,29 @@ export default function ChatPage() {
         messages,
         input,
         title,
-        useUploadedOnly,
+        uploadType,
+        activeSource,
+        mode,
       };
       localStorage.setItem("jobcoach_chat_state", JSON.stringify(snapshot));
     } catch {
       // ignore storage errors
     }
-  }, [messages, input, title, useUploadedOnly, hydrated]);
+  }, [messages, input, title, uploadType, activeSource, mode, hydrated]);
 
   useEffect(() => {
     return () => {
       streamControllerRef.current?.abort();
     };
   }, []);
+
+  useEffect(() => {
+    const onNewChat = () => {
+      resetChat();
+    };
+    window.addEventListener("jobcoach:new-chat", onNewChat as EventListener);
+    return () => window.removeEventListener("jobcoach:new-chat", onNewChat as EventListener);
+  }, [resetChat]);
 
   const updateAssistant = (updater: (msg: ChatMessage) => ChatMessage) => {
     const index = assistantIndexRef.current;
@@ -185,14 +230,71 @@ export default function ChatPage() {
     }
   };
 
+  const uploadFile = async (file: File, sourceType: UploadSourceType) => {
+    const form = new FormData();
+    form.append("file", file);
+    form.append("source_type", sourceType);
+
+    const res = await fetch("/api/ingest/file", {
+      method: "POST",
+      body: form,
+    });
+
+    const text = await res.text();
+    let data: Record<string, unknown> = {};
+    try {
+      data = JSON.parse(text) as Record<string, unknown>;
+    } catch {
+      data = {};
+    }
+
+    if (!res.ok) {
+      const detail = typeof data.detail === "string" ? data.detail : `HTTP ${res.status}`;
+      throw new Error(detail);
+    }
+
+    const sourceId = typeof data.source_id === "string" ? data.source_id : "";
+    if (!sourceId) {
+      throw new Error("upload succeeded but source_id is missing");
+    }
+
+    setActiveSource({
+      source_id: sourceId,
+      source_type: sourceType,
+      filename: file.name,
+    });
+    setErr("");
+  };
+
+  const onPickFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.currentTarget.value = "";
+    if (!file) return;
+    setUploading(true);
+    try {
+      await uploadFile(file, uploadType);
+    } catch (e: unknown) {
+      setErr(getErrorMessage(e));
+    } finally {
+      setUploading(false);
+    }
+  };
+
   const sendMessage = async () => {
     if (!canSend) return;
 
     abortCurrentStream();
 
     const userMessage: ChatMessage = { role: "user", content: input.trim() };
-    const filter: Record<string, unknown> | null =
-      useUploadedOnly && uploadedSourceId ? { source_id: uploadedSourceId } : null;
+    const historyPayload = messages
+      .filter((m) => m.role === "user" || m.role === "assistant")
+      .map((m) => ({ role: m.role, content: m.content }));
+    const resumeInterviewIntent = /简历|面试|提问|追问|mock|interview/i.test(userMessage.content);
+    const nextMode: "chat" | "resume_interview" =
+      activeSource?.source_type === "resume" && (mode === "resume_interview" || resumeInterviewIntent)
+        ? "resume_interview"
+        : "chat";
+    setMode(nextMode);
     setMessages((prev) => [...prev, userMessage]);
     setInput("");
     setLoading(true);
@@ -226,7 +328,13 @@ export default function ChatPage() {
       const res = await fetch("/api/chat/stream", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ message: userMessage.content, filter }),
+        body: JSON.stringify({
+          message: userMessage.content,
+          history: historyPayload,
+          mode: nextMode,
+          active_source_id: activeSource?.source_id ?? null,
+          active_source_type: activeSource?.source_type ?? null,
+        }),
         signal: controller.signal,
       });
 
@@ -307,13 +415,18 @@ export default function ChatPage() {
             }, 800);
             setLoading(false);
           } else if (event === "error") {
+            const errorText =
+              typeof data.error === "string" && data.error.trim()
+                ? data.error
+                : "抱歉，流式生成失败，请稍后重试。";
             updateAssistant((prev) => ({
               ...prev,
-              content: "抱歉，流式生成失败，请稍后重试。",
+              content: errorText,
               stage: "error",
               stageText: "出错",
               isStreaming: false,
             }));
+            setErr(errorText);
             setLoading(false);
           }
         }
@@ -360,28 +473,6 @@ export default function ChatPage() {
       <div className="page-header">
         <h1 className="page-title">{title}</h1>
         <p className="page-subtitle">Shift + Enter 换行，Enter 发送。Ctrl + K 聚焦输入框。</p>
-      </div>
-
-      <div className="panel" style={{ marginBottom: 16 }}>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
-          <Link className="button" href="/ingest">
-            导入资料
-          </Link>
-          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
-            <input
-              type="checkbox"
-              checked={useUploadedOnly}
-              onChange={(e) => setUseUploadedOnly(e.target.checked)}
-              disabled={!uploadedSourceId}
-            />
-            只用上传资料
-          </label>
-          {!uploadedSourceId && (
-            <span style={{ fontSize: 12, color: "var(--muted)" }}>
-              还没有上传资料
-            </span>
-          )}
-        </div>
       </div>
 
       {err && <div className="banner" style={{ marginBottom: 16 }}>{err}</div>}
@@ -520,10 +611,10 @@ export default function ChatPage() {
                           (msg.citations ?? []).find((c) => c.id === item.id)?.quote ?? "";
                         const isExpanded = expandedEvidence[key];
                         const metaExpanded = expandedMeta[key];
+                        const previewBase = quote || text;
                         const shortText =
-                          (quote || text).length > 160
-                            ? `${(quote || text).slice(0, 160)}...`
-                            : quote || text;
+                          previewBase.length > 160 ? `${previewBase.slice(0, 160)}...` : previewBase;
+                        const displayText = isExpanded ? text || quote : shortText;
                         const score =
                           typeof item.score === "number" ? item.score.toFixed(3) : "n/a";
                         const filename = item.metadata?.filename as string | undefined;
@@ -563,7 +654,7 @@ export default function ChatPage() {
                                 wordBreak: "break-word",
                               }}
                             >
-                              {isExpanded ? (quote || text) : shortText}
+                              {displayText}
                             </div>
                             {text.length > 160 && (
                               <button
@@ -635,6 +726,28 @@ export default function ChatPage() {
         </div>
 
         <form onSubmit={onSubmit} className="composer" style={{ marginTop: 16 }}>
+          <div
+            style={{
+              fontSize: 12,
+              color: "var(--muted)",
+              border: "1px solid var(--border)",
+              borderRadius: 8,
+              padding: "6px 10px",
+              background: "var(--panel)",
+              alignSelf: "flex-start",
+            }}
+          >
+            {activeSource
+              ? `当前资料：${activeSource.source_type} · ${activeSource.filename}`
+              : "当前资料：未绑定"}
+          </div>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".pdf,.docx,.md,.txt"
+            style={{ display: "none" }}
+            onChange={onPickFile}
+          />
           <textarea
             ref={textareaRef}
             className="textarea"
@@ -645,9 +758,32 @@ export default function ChatPage() {
             rows={3}
           />
           <div className="composer-actions">
-            <span style={{ color: "var(--muted)", fontSize: 12 }}>
-              Esc 取消聚焦 · Ctrl + K 聚焦
-            </span>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <button
+                type="button"
+                className="button secondary"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={uploading || loading}
+                style={{ padding: "6px 10px", lineHeight: 1 }}
+                title="上传资料"
+              >
+                {uploading ? "..." : "+"}
+              </button>
+              <select
+                className="select"
+                value={uploadType}
+                onChange={(e) => setUploadType(e.target.value as UploadSourceType)}
+                disabled={uploading || loading}
+                style={{ width: 110, padding: "8px 10px", borderRadius: 10 }}
+              >
+                <option value="resume">resume</option>
+                <option value="jd">jd</option>
+                <option value="note">note</option>
+              </select>
+              <span style={{ color: "var(--muted)", fontSize: 12 }}>
+                Esc 取消聚焦 · Ctrl + K 聚焦
+              </span>
+            </div>
             <button className="button" type="submit" disabled={!canSend}>
               {loading ? "发送中..." : "发送"}
             </button>

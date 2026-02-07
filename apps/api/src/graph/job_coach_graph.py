@@ -1,256 +1,421 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
-import logging
-from typing import TypedDict
+import json
+import re
+import uuid
+from typing import Annotated, TypedDict
 
-from src.core.output_coercion import (
-    coerce_model_output,
-    extract_citation_markers,
-    shorten_quote,
-    strip_citation_markers,
-)
-from src.core.settings import get_settings
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+
 from src.llm.zhipu import chat
-from src.rag.service import retrieve
-from src.tools.registry import call_tool
-
-logger = logging.getLogger(__name__)
-
-class GraphState(TypedDict, total=False):
-    question: str
-    top_k: int
-    filter: dict | None
-    where: dict | None
-    used_context: list[dict]
-    tool_plan: list[dict]
-    tool_results: list[dict]
-    answer: str
-    citations: list[dict]
-
-
-def _build_where(filter_dict: dict | None) -> dict | None:
-    if not filter_dict:
-        return None
-    where: dict = {}
-    source_type = filter_dict.get("source_type")
-    source_id = filter_dict.get("source_id")
-    if source_type:
-        where["source_type"] = source_type
-    if source_id:
-        where["source_id"] = source_id
-    return where or None
-
-
-def _normalize_citations(
-    citations: list[dict] | list[str] | None,
-    candidate_map: dict[str, dict],
-    max_citations: int,
-) -> list[dict]:
-    if not citations:
-        return []
-    normalized: list[dict] = []
-    for item in citations:
-        if isinstance(item, str):
-            ctx = candidate_map.get(item, {})
-            normalized.append({"id": item, "quote": shorten_quote(ctx.get("text", ""))})
-        elif isinstance(item, dict):
-            cid = item.get("id")
-            if not cid:
-                continue
-            quote = item.get("quote")
-            if not quote:
-                ctx = candidate_map.get(cid, {})
-                quote = ctx.get("text", "")
-            normalized.append({"id": cid, "quote": shorten_quote(quote or "")})
-        if len(normalized) >= max_citations:
-            break
-    return normalized
-
-
-def normalize_input(state: GraphState) -> GraphState:
-    top_k = state.get("top_k", 5)
-    top_k = max(1, min(20, int(top_k)))
-    return {
-        **state,
-        "top_k": top_k,
-        "where": _build_where(state.get("filter")),
-    }
-
-
-def retrieve_evidence(state: GraphState) -> GraphState:
-    top_k = min(8, int(state.get("top_k", 5)))
-    results = retrieve(state.get("question", ""), top_k=top_k, where=state.get("where"))
-    return {**state, "used_context": results}
-
-
-def plan_tools(state: GraphState) -> GraphState:
-    question = state.get("question", "")
-    # Fast path: avoid planner LLM round-trip; use deterministic routing.
-    keywords = ["面试", "自我介绍", "项目", "如何回答", "怎么说", "行为面", "八股", "追问"]
-    if any(k in question for k in keywords):
-        return {
-            **state,
-            "tool_plan": [
-                {"name": "skill_interview_qa", "args": {"question": question, "top_k": state.get("top_k", 5), "filter": state.get("filter")}}
-            ],
-        }
-    return {**state, "tool_plan": []}
-
-
-def execute_tools(state: GraphState) -> GraphState:
-    tool_plan = state.get("tool_plan", [])
-    results = []
-    context = {"used_context": state.get("used_context", [])}
-    for item in tool_plan:
-        name = item.get("name")
-        args = item.get("args") or {}
-        if not name:
-            continue
-        results.append({"name": name, "result": call_tool(name, args, context=context)})
-    return {**state, "tool_results": results}
-
-
-def _generate_with_llm(state: GraphState) -> GraphState:
-    used_context = state.get("used_context", [])
-    evidence = "\n".join([f"[[{c['id']}]] {c.get('text', '')}" for c in used_context])
-    prompt = (
-        "你是面试辅导助手，只能依据【证据块】回答，禁止编造。"
-        "输出必须是 Markdown 自然语言文本，不要输出 JSON，不要使用 ``` 代码块。"
-        "如果需要引用，请使用 [@chunk_id] 形式的标记（例如 [@resume_001:0]）。"
-        "不要在答案里输出 citations 或 used_context。\n"
-        f"问题：{state.get('question','')}\n【证据块】\n{evidence}"
-    )
-    content = chat([{"role": "user", "content": prompt}])
-    answer, extra_citations = coerce_model_output(content)
-    citations = state.get("citations", []) or []
-    if not citations and extra_citations:
-        citations = extra_citations
-    return {**state, "answer": answer, "citations": citations}
-
-
-def generate_final(state: GraphState) -> GraphState:
-    for item in state.get("tool_results", []):
-        if item.get("name") == "skill_interview_qa":
-            result = item.get("result", {})
-            answer_text = coerce_model_output(result.get("answer", ""))[0]
-            tool_citations = _normalize_citations(
-                result.get("citations", []),
-                {c.get("id"): c for c in result.get("used_context", []) if isinstance(c, dict)},
-                get_settings().max_citations,
-            )
-            logger.info("graph tool citations used: %s", len(tool_citations))
-            return {
-                **state,
-                "answer": answer_text,
-                "citations": tool_citations,
-                "used_context": result.get("used_context", state.get("used_context", [])),
-            }
-
-    settings = get_settings()
-    if settings.zhipu_api_key:
-        state = _generate_with_llm(state)
-        # Use inline citation markers to build actual citations
-        markers = extract_citation_markers(state.get("answer", ""))
-        if markers:
-            logger.info("graph markers found: %s", len(markers))
-        max_citations = settings.max_citations
-        candidate_map = {c.get("id"): c for c in state.get("used_context", [])}
-        marker_citations = []
-        for marker in markers:
-            if marker in candidate_map:
-                ctx = candidate_map[marker]
-                marker_citations.append(
-                    {"id": marker, "quote": shorten_quote(ctx.get("text", ""))}
-                )
-            if len(marker_citations) >= max_citations:
-                break
-
-        citations = state.get("citations", []) or []
-        if not citations and marker_citations:
-            citations = marker_citations
-        if not citations and state.get("used_context"):
-            top_ctx = state["used_context"][0]
-            if isinstance(top_ctx, dict) and top_ctx.get("id"):
-                citations = [
-                    {
-                        "id": top_ctx.get("id"),
-                        "quote": shorten_quote(top_ctx.get("text", "")),
-                    }
-                ]
-
-        # Strip markers from final answer for display
-        answer_clean = strip_citation_markers(state.get("answer", ""))
-        citations = _normalize_citations(citations, candidate_map, max_citations)
-
-        logger.info(
-            "graph citations: tool=%s markers=%s final=%s",
-            bool(state.get("citations")),
-            len(marker_citations),
-            len(citations),
-        )
-
-        return {**state, "answer": answer_clean, "citations": citations}
-
-    # fallback without LLM
-    used_context = state.get("used_context", [])
-    if used_context:
-        return {
-            **state,
-            "answer": used_context[0].get("text", "")[:200],
-            "citations": [{"id": used_context[0].get("id", ""), "quote": used_context[0].get("text", "")[:120]}],
-        }
-    return {**state, "answer": "暂无可用证据，请先导入资料后再提问。", "citations": []}
-
+from src.skills.interview_qa import run_interview_turn, run_resume_interview_turn
 
 try:
-    from langgraph.graph import StateGraph
+    from langgraph.graph import END, START, StateGraph
+    from langgraph.graph.message import add_messages
+    from langgraph.prebuilt import ToolNode
 
     _LANGGRAPH_AVAILABLE = True
 except Exception:
+    END = "__end__"
+    START = "__start__"
+
+    def add_messages(x):  # type: ignore
+        return x
+
+    ToolNode = None  # type: ignore
     _LANGGRAPH_AVAILABLE = False
+
+SESSION_MARKER = "__SESSION__:"
+DEFAULT_SESSION = {
+    "mode": "chat",
+    "active_source_id": None,
+    "active_source_type": None,
+}
+
+
+class AgentState(TypedDict, total=False):
+    messages: Annotated[list[BaseMessage], add_messages]
+    session: dict
+
+
+_TOOLS = [run_interview_turn, run_resume_interview_turn]
+_TOOL_NODE = ToolNode(_TOOLS) if _LANGGRAPH_AVAILABLE else None
+
+
+def _ensure_str(value) -> str:
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _extract_json(text: str) -> dict | None:
+    raw = _ensure_str(text).strip()
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    match = re.search(r"\{[\s\S]*\}", raw)
+    if not match:
+        return None
+    try:
+        data = json.loads(match.group(0))
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _parse_tool_payload(content: str) -> dict | None:
+    data = _extract_json(content)
+    if not isinstance(data, dict):
+        return None
+    if "answer" not in data:
+        return None
+    return data
+
+
+def _history_to_lc_messages(history: list | None) -> list[BaseMessage]:
+    messages: list[BaseMessage] = []
+    for item in history or []:
+        if isinstance(item, dict):
+            role = item.get("role")
+            content = _ensure_str(item.get("content", ""))
+            if role == "system":
+                messages.append(SystemMessage(content=content))
+            elif role == "assistant":
+                messages.append(AIMessage(content=content))
+            elif role == "tool":
+                messages.append(ToolMessage(content=content, tool_call_id=item.get("tool_call_id", "history_tool")))
+            else:
+                messages.append(HumanMessage(content=content))
+        else:
+            messages.append(HumanMessage(content=_ensure_str(item)))
+    return messages
+
+
+def _to_openai_messages(messages: list[BaseMessage]) -> list[dict]:
+    out: list[dict] = []
+    for msg in messages:
+        if isinstance(msg, SystemMessage):
+            out.append({"role": "system", "content": _ensure_str(msg.content)})
+        elif isinstance(msg, HumanMessage):
+            out.append({"role": "user", "content": _ensure_str(msg.content)})
+        elif isinstance(msg, AIMessage):
+            out.append({"role": "assistant", "content": _ensure_str(msg.content)})
+        elif isinstance(msg, ToolMessage):
+            out.append({"role": "tool", "content": _ensure_str(msg.content)})
+    return out
+
+
+def _latest_user_input(messages: list[BaseMessage]) -> str:
+    for msg in reversed(messages):
+        if isinstance(msg, HumanMessage):
+            return _ensure_str(msg.content)
+    return ""
+
+
+def _history_for_tool(messages: list[BaseMessage]) -> list[dict]:
+    history: list[dict] = []
+    for msg in messages:
+        if isinstance(msg, HumanMessage):
+            history.append({"role": "user", "content": _ensure_str(msg.content)})
+        elif isinstance(msg, AIMessage) and not msg.tool_calls:
+            history.append({"role": "assistant", "content": _ensure_str(msg.content)})
+    return history
+
+
+def _extract_session_from_history(history: list | None) -> tuple[list, dict]:
+    session = dict(DEFAULT_SESSION)
+    cleaned: list = []
+    for item in history or []:
+        if isinstance(item, dict) and item.get("role") == "system":
+            content = _ensure_str(item.get("content", ""))
+            if content.startswith(SESSION_MARKER):
+                payload = content[len(SESSION_MARKER) :].strip()
+                data = _extract_json(payload)
+                if isinstance(data, dict):
+                    session.update(
+                        {
+                            "mode": data.get("mode", session["mode"]),
+                            "active_source_id": data.get("active_source_id", session["active_source_id"]),
+                            "active_source_type": data.get("active_source_type", session["active_source_type"]),
+                        }
+                    )
+                continue
+        cleaned.append(item)
+    return cleaned, session
+
+
+def _build_router_prompt(session: dict) -> str:
+    return (
+        "You are a senior AI job coach. Decide user intent intelligently.\n"
+        "If the user wants mock interview, call interview tools; if casual chat, answer directly.\n"
+        "Tools:\n"
+        "1) run_interview_turn(user_input, history, topic)\n"
+        "2) run_resume_interview_turn(user_input, history, source_id, top_k)\n\n"
+        f"Current mode: {session.get('mode')}\n"
+        f"Current bound source: source_type={session.get('active_source_type')}, "
+        f"source_id={session.get('active_source_id')}\n\n"
+        "Policy:\n"
+        "- If user asks resume-focused mock interview and resume source is bound, use run_resume_interview_turn.\n"
+        "- If user asks technical interview but resume is not bound, use run_interview_turn.\n"
+        "- For casual chat, answer directly.\n"
+        "Output JSON only:\n"
+        'Tool: {"action":"tool","name":"run_resume_interview_turn","args":{...}}\n'
+        'Direct: {"action":"final","answer":"..."}'
+    )
+
+
+def _normalize_tool_args(name: str, args: dict, messages: list[BaseMessage], session: dict) -> dict:
+    normalized = dict(args)
+    if not _ensure_str(normalized.get("user_input", "")).strip():
+        normalized["user_input"] = _latest_user_input(messages)
+    if "history" not in normalized:
+        normalized["history"] = _history_for_tool(messages)
+    if name == "run_resume_interview_turn":
+        normalized.setdefault("source_id", session.get("active_source_id"))
+        normalized.setdefault("top_k", 6)
+    else:
+        normalized.setdefault("topic", None)
+    return normalized
+
+
+def _infer_tool(decision: dict, session: dict, messages: list[BaseMessage]) -> tuple[str, dict] | None:
+    name = _ensure_str(decision.get("name"))
+    args = decision.get("args") if isinstance(decision.get("args"), dict) else {}
+    latest = _latest_user_input(messages).lower()
+    wants_resume_interview = any(
+        key in latest for key in ["resume", "interview", "mock", "question", "ask me"]
+    )
+
+    if decision.get("action") == "tool" and name in {"run_interview_turn", "run_resume_interview_turn"}:
+        if name == "run_resume_interview_turn" and not session.get("active_source_id"):
+            return "run_interview_turn", _normalize_tool_args("run_interview_turn", args, messages, session)
+        return name, _normalize_tool_args(name, args, messages, session)
+
+    if (
+        session.get("active_source_type") == "resume"
+        and session.get("active_source_id")
+        and (session.get("mode") == "resume_interview" or wants_resume_interview)
+    ):
+        return "run_resume_interview_turn", _normalize_tool_args(
+            "run_resume_interview_turn",
+            args,
+            messages,
+            session,
+        )
+
+    if wants_resume_interview:
+        return "run_interview_turn", _normalize_tool_args("run_interview_turn", args, messages, session)
+
+    return None
+
+
+def agent_node(state: AgentState) -> AgentState:
+    messages = state.get("messages", [])
+    session = state.get("session") or dict(DEFAULT_SESSION)
+
+    if messages and isinstance(messages[-1], ToolMessage):
+        payload = _parse_tool_payload(_ensure_str(messages[-1].content))
+        if payload:
+            return {"messages": [AIMessage(content=_ensure_str(payload.get("answer", "")))]}
+        return {"messages": [AIMessage(content=_ensure_str(messages[-1].content))]}
+
+    # Deterministic routing for resume interview mode to reduce model routing drift.
+    if (
+        session.get("mode") == "resume_interview"
+        and session.get("active_source_type") == "resume"
+        and session.get("active_source_id")
+    ):
+        call_id = f"call_{uuid.uuid4().hex[:10]}"
+        return {
+            "messages": [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "id": call_id,
+                            "name": "run_resume_interview_turn",
+                            "args": {
+                                "user_input": _latest_user_input(messages),
+                                "history": _history_for_tool(messages),
+                                "source_id": _ensure_str(session.get("active_source_id")),
+                                "top_k": 6,
+                            },
+                        }
+                    ],
+                )
+            ]
+        }
+
+    router_prompt = _build_router_prompt(session)
+    prompt_messages: list[BaseMessage] = [SystemMessage(content=router_prompt), *messages]
+    raw = chat(_to_openai_messages(prompt_messages))
+    decision = _extract_json(raw) or {}
+    tool_plan = _infer_tool(decision, session, messages)
+
+    if tool_plan:
+        name, args = tool_plan
+        call_id = f"call_{uuid.uuid4().hex[:10]}"
+        return {
+            "messages": [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "id": call_id,
+                            "name": name,
+                            "args": args,
+                        }
+                    ],
+                )
+            ]
+        }
+
+    answer = _ensure_str(decision.get("answer") or raw).strip()
+    return {"messages": [AIMessage(content=answer)]}
+
+
+def _route_next(state: AgentState) -> str:
+    messages = state.get("messages", [])
+    if not messages:
+        return END
+    last = messages[-1]
+    if isinstance(last, AIMessage) and last.tool_calls:
+        return "tools"
+    return END
 
 
 def _build_graph():
-    graph = StateGraph(GraphState)
-    graph.add_node("normalize_input", normalize_input)
-    graph.add_node("retrieve_evidence", retrieve_evidence)
-    graph.add_node("plan_tools", plan_tools)
-    graph.add_node("execute_tools", execute_tools)
-    graph.add_node("generate_final", generate_final)
-
-    graph.set_entry_point("normalize_input")
-    graph.add_edge("normalize_input", "retrieve_evidence")
-    graph.add_edge("retrieve_evidence", "plan_tools")
-
-    def _route_tools(state: GraphState):
-        return "execute_tools" if state.get("tool_plan") else "generate_final"
-
-    graph.add_conditional_edges("plan_tools", _route_tools)
-    graph.add_edge("execute_tools", "generate_final")
-    graph.set_finish_point("generate_final")
+    if not _LANGGRAPH_AVAILABLE or _TOOL_NODE is None:
+        return None
+    graph = StateGraph(AgentState)
+    graph.add_node("agent", agent_node)
+    graph.add_node("tools", _TOOL_NODE)
+    graph.add_edge(START, "agent")
+    graph.add_conditional_edges("agent", _route_next, {"tools": "tools", END: END})
+    graph.add_edge("tools", "agent")
     return graph.compile()
 
 
-_GRAPH = _build_graph() if _LANGGRAPH_AVAILABLE else None
+_GRAPH = _build_graph()
 
 
-def run_graph(question: str, top_k: int = 5, filter: dict | None = None) -> dict:
-    state: GraphState = {"question": question, "top_k": top_k, "filter": filter}
-    if _GRAPH is not None:
-        result = _GRAPH.invoke(state)
-    else:
-        state = normalize_input(state)
-        state = retrieve_evidence(state)
-        state = plan_tools(state)
-        if state.get("tool_plan"):
-            state = execute_tools(state)
-        state = generate_final(state)
-        result = state
+def run_graph(question: str, history: list | None = None) -> dict:
+    clean_history, session = _extract_session_from_history(history)
+    input_messages: list[BaseMessage] = [
+        *_history_to_lc_messages(clean_history),
+        HumanMessage(content=_ensure_str(question)),
+    ]
+
+    if _GRAPH is None:
+        router_prompt = _build_router_prompt(session)
+        raw = chat(_to_openai_messages([SystemMessage(content=router_prompt), *input_messages]))
+        decision = _extract_json(raw) or {}
+        tool_plan = _infer_tool(decision, session, input_messages)
+        if tool_plan:
+            name, args = tool_plan
+            if name == "run_resume_interview_turn":
+                tool_answer = run_resume_interview_turn.func(
+                    user_input=_ensure_str(args.get("user_input", "")),
+                    history=args.get("history") or [],
+                    source_id=_ensure_str(args.get("source_id", "")),
+                    top_k=int(args.get("top_k", 6)),
+                )
+            else:
+                tool_answer = run_interview_turn.func(
+                    user_input=_ensure_str(args.get("user_input", "")),
+                    history=args.get("history") or [],
+                    topic=args.get("topic"),
+                )
+            parsed_tool = _parse_tool_payload(_ensure_str(tool_answer))
+            return {
+                "answer": _ensure_str(parsed_tool.get("answer", tool_answer)) if parsed_tool else _ensure_str(tool_answer),
+                "tool_results": [{"name": name, "result": _ensure_str(tool_answer)}],
+                "citations": parsed_tool.get("citations", []) if parsed_tool else [],
+                "used_context": parsed_tool.get("used_context", []) if parsed_tool else [],
+            }
+        return {
+            "answer": _ensure_str(decision.get("answer") or raw),
+            "tool_results": [],
+            "citations": [],
+            "used_context": [],
+        }
+
+    try:
+        result = _GRAPH.invoke({"messages": input_messages, "session": session})
+        messages = result.get("messages", [])
+    except Exception as exc:
+        # Safety fallback: keep the chat alive even if graph/tool execution fails.
+        latest = _ensure_str(question)
+        prior = _history_for_tool(input_messages)
+        try:
+            if session.get("active_source_type") == "resume" and session.get("active_source_id"):
+                tool_answer = run_resume_interview_turn.func(
+                    user_input=latest,
+                    history=prior,
+                    source_id=_ensure_str(session.get("active_source_id")),
+                    top_k=6,
+                )
+                parsed_tool = _parse_tool_payload(_ensure_str(tool_answer))
+                return {
+                    "answer": _ensure_str(parsed_tool.get("answer", tool_answer)) if parsed_tool else _ensure_str(tool_answer),
+                    "tool_results": [
+                        {"name": "run_resume_interview_turn", "result": _ensure_str(tool_answer)}
+                    ],
+                    "citations": parsed_tool.get("citations", []) if parsed_tool else [],
+                    "used_context": parsed_tool.get("used_context", []) if parsed_tool else [],
+                }
+            tool_answer = run_interview_turn.func(
+                user_input=latest,
+                history=prior,
+                topic="technical interview",
+            )
+            return {
+                "answer": _ensure_str(tool_answer),
+                "tool_results": [{"name": "run_interview_turn", "result": _ensure_str(tool_answer)}],
+                "citations": [],
+                "used_context": [],
+            }
+        except Exception as inner_exc:
+            return {
+                "answer": f"Agent execution failed: {inner_exc}",
+                "tool_results": [{"name": "error", "result": str(exc)}],
+                "citations": [],
+                "used_context": [],
+            }
+
+    answer = ""
+    for msg in reversed(messages):
+        if isinstance(msg, AIMessage) and not msg.tool_calls:
+            answer = _ensure_str(msg.content)
+            break
+
+    tool_results: list[dict] = []
+    citations: list[dict] = []
+    used_context: list[dict] = []
+    for msg in messages:
+        if isinstance(msg, ToolMessage):
+            parsed = _parse_tool_payload(_ensure_str(msg.content))
+            if parsed:
+                if not citations and isinstance(parsed.get("citations"), list):
+                    citations = parsed.get("citations", [])
+                if not used_context and isinstance(parsed.get("used_context"), list):
+                    used_context = parsed.get("used_context", [])
+            tool_results.append(
+                {
+                    "name": getattr(msg, "name", "") or "tool",
+                    "result": _ensure_str(msg.content),
+                }
+            )
 
     return {
-        "answer": result.get("answer", ""),
-        "citations": result.get("citations", []),
-        "used_context": result.get("used_context", result.get("used_context", [])),
-        "tool_results": result.get("tool_results", []),
+        "answer": answer,
+        "tool_results": tool_results,
+        "citations": citations,
+        "used_context": used_context,
     }
-

@@ -1,19 +1,12 @@
-﻿from types import SimpleNamespace
-
 from src.graph import job_coach_graph
 
 
-def test_graph_coercion(monkeypatch):
+def test_graph_direct_answer(monkeypatch):
     def fake_chat(messages):
-        return '```json {"answer":"你好","citations":[{"id":"c1","quote":"引用内容"}]} ```'
+        return '{"action":"final","answer":"你好"}'
 
     monkeypatch.setattr(job_coach_graph, "chat", fake_chat)
-    monkeypatch.setattr(
-        job_coach_graph,
-        "get_settings",
-        lambda: SimpleNamespace(zhipu_api_key="x", max_citations=3),
-    )
-    monkeypatch.setattr(job_coach_graph, "retrieve", lambda *args, **kwargs: [])
 
-    result = job_coach_graph.run_graph("测试问题", top_k=1, filter=None)
+    result = job_coach_graph.run_graph("测试问题", history=[])
     assert result.get("answer") == "你好"
+    assert result.get("tool_results") == []

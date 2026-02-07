@@ -1,32 +1,32 @@
-﻿from fastapi import APIRouter
+from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from src.skills.interview_qa import run_interview_qa
+from src.skills.interview_qa import run_interview_turn
 
 
 router = APIRouter()
 
 
 class InterviewQARequest(BaseModel):
-    question: str
-    top_k: int = Field(default=5, ge=1, le=20)
-    filter: dict | None = None
+    user_input: str | None = None
+    question: str | None = None
+    history: list = Field(default_factory=list)
+    topic: str | None = None
 
 
 @router.post("/skills/interview_qa")
 def interview_qa(payload: InterviewQARequest):
-    where = None
-    if payload.filter:
-        where = {}
-        source_type = payload.filter.get("source_type")
-        source_id = payload.filter.get("source_id")
-        if source_type:
-            where["source_type"] = source_type
-        if source_id:
-            where["source_id"] = source_id
+    user_input = payload.user_input or payload.question or ""
+    if not user_input.strip():
+        return {"ok": False, "error": "user_input is required"}
 
-    return run_interview_qa(
-        payload.question,
-        top_k=payload.top_k,
-        where=where,
-    )
+    try:
+        answer = run_interview_turn.func(
+            user_input=user_input,
+            history=payload.history,
+            topic=payload.topic,
+        )
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+    return {"ok": True, "answer": answer, "citations": [], "used_context": []}

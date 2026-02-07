@@ -2,7 +2,14 @@
 
 export async function POST(request: Request) {
   const bodyText = await request.text();
-  let payload: { message?: string; top_k?: number } = {};
+  let payload: {
+    message?: string;
+    top_k?: number;
+    history?: Array<{ role: string; content: string }>;
+    mode?: string;
+    active_source_id?: string;
+    active_source_type?: string;
+  } = {};
   try {
     payload = JSON.parse(bodyText);
   } catch {
@@ -12,7 +19,10 @@ export async function POST(request: Request) {
   const forwardBody = JSON.stringify({
     question: payload.message ?? "",
     top_k: payload.top_k ?? 5,
-    filter: { source_type: "resume" },
+    history: payload.history ?? [],
+    mode: payload.mode ?? "chat",
+    active_source_id: payload.active_source_id ?? null,
+    active_source_type: payload.active_source_type ?? null,
   });
 
   const backendBase = getBackendBase();

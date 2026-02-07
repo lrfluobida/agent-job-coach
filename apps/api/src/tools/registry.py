@@ -7,7 +7,7 @@ import time
 
 from src.ingest.pipeline import ingest_text
 from src.rag.service import retrieve
-from src.skills.interview_qa import run_interview_qa
+from src.skills.interview_qa import run_interview_turn
 from src.tools.mcp_client import mcp_call_tool, mcp_list_tools
 import hashlib
 
@@ -35,15 +35,15 @@ def _builtin_tools() -> list[ToolSpec]:
     return [
         ToolSpec(
             name="skill_interview_qa",
-            description="面试问答技能：基于证据块输出结构化答案与引用",
+            description="模拟技术面试：评估候选人回答并发起下一轮深度追问",
             json_schema={
                 "type": "object",
                 "properties": {
-                    "question": {"type": "string"},
-                    "top_k": {"type": "integer", "default": 5},
-                    "filter": {"type": ["object", "null"]},
+                    "user_input": {"type": "string"},
+                    "history": {"type": "array", "default": []},
+                    "topic": {"type": ["string", "null"]},
                 },
-                "required": ["question"],
+                "required": ["user_input"],
             },
         ),
         ToolSpec(
@@ -105,22 +105,29 @@ def call_tool(name: str, args: dict, *, context: dict | None = None) -> dict:
     context = context or {}
     logger.info("tool_call name=%s", name)
     if name == "skill_interview_qa":
-        where = None
-        filter_obj = args.get("filter")
-        if filter_obj:
-            where = {}
-            source_type = filter_obj.get("source_type")
-            source_id = filter_obj.get("source_id")
-            if source_type:
-                where["source_type"] = source_type
-            if source_id:
-                where["source_id"] = source_id
-        return run_interview_qa(
-            args.get("question", ""),
-            top_k=int(args.get("top_k", 5)),
-            where=where,
-            used_context=context.get("used_context"),
-        )
+        user_input = args.get("user_input") or args.get("question", "")
+        history = args.get("history")
+        if history is None:
+            history = context.get("history", [])
+        topic = args.get("topic")
+        if topic is None:
+            topic = context.get("topic")
+
+        try:
+            answer = run_interview_turn.func(
+                user_input=user_input,
+                history=history or [],
+                topic=topic,
+            )
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+        return {
+            "ok": True,
+            "answer": answer,
+            "citations": [],
+            "used_context": context.get("used_context", []),
+        }
     if name == "rag_retrieve":
         where = None
         filter_obj = args.get("filter")

@@ -2,6 +2,7 @@
 
 import hashlib
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -14,21 +15,18 @@ ALLOWED_EXTENSIONS = {".txt", ".md", ".pdf", ".docx"}
 logger = logging.getLogger(__name__)
 
 
-def _safe_filename(name: str) -> str:
-    base = Path(name).name
-    safe = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in base)
-    return safe or "upload"
+def normalize_text_for_hash(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
 
 
-def _sha256_hex(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
+def content_sha256(text: str) -> str:
+    normalized = normalize_text_for_hash(text)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
-def generate_upload_source_id(filename: str, data: bytes) -> str:
-    date_part = datetime.now(timezone.utc).strftime("%Y%m%d")
-    digest = _sha256_hex(data)[:8]
-    safe = _safe_filename(filename)
-    return f"upload_{date_part}_{digest}_{safe}"
+def generate_upload_source_id(source_type: str, content_hash: str) -> str:
+    prefix = "".join(ch for ch in source_type if ch.isalnum() or ch in {"-", "_"}).lower() or "doc"
+    return f"{prefix}_{content_hash[:16]}"
 
 
 def extract_text_from_upload(filename: str, content_type: str | None, data: bytes) -> str:

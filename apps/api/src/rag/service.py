@@ -12,12 +12,28 @@ def _ensure_str(value) -> str:
     return str(value)
 
 
+def _normalize_where(where: dict | None) -> dict | None:
+    if not where:
+        return None
+    # Chroma expects exactly one top-level operator when composing multiple clauses.
+    # Convert plain multi-field equality filters into {"$and": [{"k": {"$eq": v}}, ...]}.
+    if any(str(k).startswith("$") for k in where.keys()):
+        return where
+    items = [(k, v) for k, v in where.items() if v is not None]
+    if not items:
+        return None
+    if len(items) == 1:
+        k, v = items[0]
+        return {k: v}
+    return {"$and": [{k: {"$eq": v}} for k, v in items]}
+
+
 def retrieve(query: str, top_k: int, where: dict | None) -> list[dict]:
     if count_collection() == 0:
         return []
 
     embedding = embed_texts([query])[0]
-    raw = query_collection(embedding=embedding, top_k=top_k, where=where)
+    raw = query_collection(embedding=embedding, top_k=top_k, where=_normalize_where(where))
 
     ids = (raw.get("ids") or [[]])[0]
     documents = (raw.get("documents") or [[]])[0]

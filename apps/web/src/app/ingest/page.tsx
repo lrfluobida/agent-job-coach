@@ -148,7 +148,6 @@ export default function IngestPage() {
             onChange={(e) => setSourceType(e.target.value)}
             style={{ marginTop: 8 }}
           >
-            <option value="upload">上传资料</option>
             <option value="resume">简历</option>
             <option value="jd">岗位描述</option>
             <option value="note">笔记</option>
