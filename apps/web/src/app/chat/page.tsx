@@ -62,6 +62,20 @@ function makeTitle(text: string) {
   return `${trimmed.slice(0, maxLen)}...`;
 }
 
+function makeConversationId() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `conv_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function makeRequestId() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
 function getErrorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
   return String(err);
@@ -84,6 +98,7 @@ export default function ChatPage() {
   const [uploading, setUploading] = useState(false);
   const [activeSource, setActiveSource] = useState<ActiveSource>(null);
   const [mode, setMode] = useState<"chat" | "resume_interview">("chat");
+  const [conversationId, setConversationId] = useState<string>(() => makeConversationId());
   const [hydrated, setHydrated] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -106,6 +121,7 @@ export default function ChatPage() {
     setExpandedMeta({});
     setMode("chat");
     setActiveSource(null);
+    setConversationId(makeConversationId());
   }, []);
 
   const canSend = useMemo(() => input.trim().length > 0 && !loading, [input, loading]);
@@ -121,6 +137,7 @@ export default function ChatPage() {
         uploadType?: UploadSourceType;
         activeSource?: ActiveSource;
         mode?: "chat" | "resume_interview";
+        conversationId?: string;
       };
       if (Array.isArray(data.messages)) {
         const restored = data.messages.map((msg) => ({
@@ -146,6 +163,9 @@ export default function ChatPage() {
       }
       if (data.mode === "chat" || data.mode === "resume_interview") {
         setMode(data.mode);
+      }
+      if (typeof data.conversationId === "string" && data.conversationId.trim().length > 0) {
+        setConversationId(data.conversationId);
       }
     } catch {
       // ignore corrupted cache
@@ -184,12 +204,13 @@ export default function ChatPage() {
         uploadType,
         activeSource,
         mode,
+        conversationId,
       };
       localStorage.setItem("jobcoach_chat_state", JSON.stringify(snapshot));
     } catch {
       // ignore storage errors
     }
-  }, [messages, input, title, uploadType, activeSource, mode, hydrated]);
+  }, [messages, input, title, uploadType, activeSource, mode, conversationId, hydrated]);
 
   useEffect(() => {
     return () => {
@@ -325,6 +346,7 @@ export default function ChatPage() {
     streamControllerRef.current = controller;
 
     try {
+      const requestId = makeRequestId();
       const res = await fetch("/api/chat/stream", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -334,6 +356,8 @@ export default function ChatPage() {
           mode: nextMode,
           active_source_id: activeSource?.source_id ?? null,
           active_source_type: activeSource?.source_type ?? null,
+          conversation_id: conversationId,
+          request_id: requestId,
         }),
         signal: controller.signal,
       });
@@ -396,12 +420,18 @@ export default function ChatPage() {
               isStreaming: true,
             }));
           } else if (event === "context") {
+            if (typeof data.conversation_id === "string" && data.conversation_id.trim()) {
+              setConversationId(data.conversation_id);
+            }
             updateAssistant((prev) => ({
               ...prev,
               citations: normalizeCitations(data.citations),
               used_context: Array.isArray(data.used_context) ? data.used_context : [],
             }));
           } else if (event === "done") {
+            if (typeof data.conversation_id === "string" && data.conversation_id.trim()) {
+              setConversationId(data.conversation_id);
+            }
             updateAssistant((prev) => ({
               ...prev,
               stage: "done",

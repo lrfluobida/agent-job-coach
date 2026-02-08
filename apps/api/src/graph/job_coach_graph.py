@@ -8,7 +8,8 @@ from typing import Annotated, TypedDict
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 
 from src.llm.zhipu import chat
-from src.skills.interview_qa import run_interview_turn, run_resume_interview_turn
+from src.skills.interview_qa import run_interview_turn
+from src.skills.resume_note_interview import run_resume_note_interview_turn
 
 try:
     from langgraph.graph import END, START, StateGraph
@@ -31,6 +32,8 @@ DEFAULT_SESSION = {
     "mode": "chat",
     "active_source_id": None,
     "active_source_type": None,
+    "conversation_id": None,
+    "resume_interview_state": {},
 }
 
 
@@ -39,7 +42,7 @@ class AgentState(TypedDict, total=False):
     session: dict
 
 
-_TOOLS = [run_interview_turn, run_resume_interview_turn]
+_TOOLS = [run_interview_turn, run_resume_note_interview_turn]
 _TOOL_NODE = ToolNode(_TOOLS) if _LANGGRAPH_AVAILABLE else None
 
 
@@ -143,6 +146,11 @@ def _extract_session_from_history(history: list | None) -> tuple[list, dict]:
                             "mode": data.get("mode", session["mode"]),
                             "active_source_id": data.get("active_source_id", session["active_source_id"]),
                             "active_source_type": data.get("active_source_type", session["active_source_type"]),
+                            "conversation_id": data.get("conversation_id", session["conversation_id"]),
+                            "resume_interview_state": data.get(
+                                "resume_interview_state",
+                                session["resume_interview_state"],
+                            ),
                         }
                     )
                 continue
@@ -156,16 +164,16 @@ def _build_router_prompt(session: dict) -> str:
         "If the user wants mock interview, call interview tools; if casual chat, answer directly.\n"
         "Tools:\n"
         "1) run_interview_turn(user_input, history, topic)\n"
-        "2) run_resume_interview_turn(user_input, history, source_id, top_k)\n\n"
+        "2) run_resume_note_interview_turn(user_input, history, source_id, top_k, session)\n\n"
         f"Current mode: {session.get('mode')}\n"
         f"Current bound source: source_type={session.get('active_source_type')}, "
         f"source_id={session.get('active_source_id')}\n\n"
         "Policy:\n"
-        "- If user asks resume-focused mock interview and resume source is bound, use run_resume_interview_turn.\n"
+        "- If user asks resume-focused mock interview and resume source is bound, use run_resume_note_interview_turn.\n"
         "- If user asks technical interview but resume is not bound, use run_interview_turn.\n"
         "- For casual chat, answer directly.\n"
         "Output JSON only:\n"
-        'Tool: {"action":"tool","name":"run_resume_interview_turn","args":{...}}\n'
+        'Tool: {"action":"tool","name":"run_resume_note_interview_turn","args":{...}}\n'
         'Direct: {"action":"final","answer":"..."}'
     )
 
@@ -176,9 +184,10 @@ def _normalize_tool_args(name: str, args: dict, messages: list[BaseMessage], ses
         normalized["user_input"] = _latest_user_input(messages)
     if "history" not in normalized:
         normalized["history"] = _history_for_tool(messages)
-    if name == "run_resume_interview_turn":
+    if name == "run_resume_note_interview_turn":
         normalized.setdefault("source_id", session.get("active_source_id"))
-        normalized.setdefault("top_k", 6)
+        normalized.setdefault("top_k", 12)
+        normalized.setdefault("session", session.get("resume_interview_state") or {})
     else:
         normalized.setdefault("topic", None)
     return normalized
@@ -192,8 +201,8 @@ def _infer_tool(decision: dict, session: dict, messages: list[BaseMessage]) -> t
         key in latest for key in ["resume", "interview", "mock", "question", "ask me"]
     )
 
-    if decision.get("action") == "tool" and name in {"run_interview_turn", "run_resume_interview_turn"}:
-        if name == "run_resume_interview_turn" and not session.get("active_source_id"):
+    if decision.get("action") == "tool" and name in {"run_interview_turn", "run_resume_note_interview_turn"}:
+        if name == "run_resume_note_interview_turn" and not session.get("active_source_id"):
             return "run_interview_turn", _normalize_tool_args("run_interview_turn", args, messages, session)
         return name, _normalize_tool_args(name, args, messages, session)
 
@@ -202,8 +211,8 @@ def _infer_tool(decision: dict, session: dict, messages: list[BaseMessage]) -> t
         and session.get("active_source_id")
         and (session.get("mode") == "resume_interview" or wants_resume_interview)
     ):
-        return "run_resume_interview_turn", _normalize_tool_args(
-            "run_resume_interview_turn",
+        return "run_resume_note_interview_turn", _normalize_tool_args(
+            "run_resume_note_interview_turn",
             args,
             messages,
             session,
@@ -239,12 +248,13 @@ def agent_node(state: AgentState) -> AgentState:
                     tool_calls=[
                         {
                             "id": call_id,
-                            "name": "run_resume_interview_turn",
+                            "name": "run_resume_note_interview_turn",
                             "args": {
                                 "user_input": _latest_user_input(messages),
                                 "history": _history_for_tool(messages),
                                 "source_id": _ensure_str(session.get("active_source_id")),
-                                "top_k": 6,
+                                "top_k": 12,
+                                "session": session.get("resume_interview_state") or {},
                             },
                         }
                     ],
@@ -319,12 +329,13 @@ def run_graph(question: str, history: list | None = None) -> dict:
         tool_plan = _infer_tool(decision, session, input_messages)
         if tool_plan:
             name, args = tool_plan
-            if name == "run_resume_interview_turn":
-                tool_answer = run_resume_interview_turn.func(
+            if name == "run_resume_note_interview_turn":
+                tool_answer = run_resume_note_interview_turn.func(
                     user_input=_ensure_str(args.get("user_input", "")),
                     history=args.get("history") or [],
                     source_id=_ensure_str(args.get("source_id", "")),
-                    top_k=int(args.get("top_k", 6)),
+                    top_k=int(args.get("top_k", 12)),
+                    session=args.get("session") if isinstance(args.get("session"), dict) else {},
                 )
             else:
                 tool_answer = run_interview_turn.func(
@@ -338,12 +349,14 @@ def run_graph(question: str, history: list | None = None) -> dict:
                 "tool_results": [{"name": name, "result": _ensure_str(tool_answer)}],
                 "citations": parsed_tool.get("citations", []) if parsed_tool else [],
                 "used_context": parsed_tool.get("used_context", []) if parsed_tool else [],
+                "session": parsed_tool.get("session", {}) if parsed_tool else {},
             }
         return {
             "answer": _ensure_str(decision.get("answer") or raw),
             "tool_results": [],
             "citations": [],
             "used_context": [],
+            "session": {},
         }
 
     try:
@@ -355,20 +368,22 @@ def run_graph(question: str, history: list | None = None) -> dict:
         prior = _history_for_tool(input_messages)
         try:
             if session.get("active_source_type") == "resume" and session.get("active_source_id"):
-                tool_answer = run_resume_interview_turn.func(
+                tool_answer = run_resume_note_interview_turn.func(
                     user_input=latest,
                     history=prior,
                     source_id=_ensure_str(session.get("active_source_id")),
-                    top_k=6,
+                    top_k=12,
+                    session=session.get("resume_interview_state") if isinstance(session.get("resume_interview_state"), dict) else {},
                 )
                 parsed_tool = _parse_tool_payload(_ensure_str(tool_answer))
                 return {
                     "answer": _ensure_str(parsed_tool.get("answer", tool_answer)) if parsed_tool else _ensure_str(tool_answer),
                     "tool_results": [
-                        {"name": "run_resume_interview_turn", "result": _ensure_str(tool_answer)}
+                        {"name": "run_resume_note_interview_turn", "result": _ensure_str(tool_answer)}
                     ],
                     "citations": parsed_tool.get("citations", []) if parsed_tool else [],
                     "used_context": parsed_tool.get("used_context", []) if parsed_tool else [],
+                    "session": parsed_tool.get("session", {}) if parsed_tool else {},
                 }
             tool_answer = run_interview_turn.func(
                 user_input=latest,
@@ -380,6 +395,7 @@ def run_graph(question: str, history: list | None = None) -> dict:
                 "tool_results": [{"name": "run_interview_turn", "result": _ensure_str(tool_answer)}],
                 "citations": [],
                 "used_context": [],
+                "session": {},
             }
         except Exception as inner_exc:
             return {
@@ -387,6 +403,7 @@ def run_graph(question: str, history: list | None = None) -> dict:
                 "tool_results": [{"name": "error", "result": str(exc)}],
                 "citations": [],
                 "used_context": [],
+                "session": {},
             }
 
     answer = ""
@@ -398,6 +415,7 @@ def run_graph(question: str, history: list | None = None) -> dict:
     tool_results: list[dict] = []
     citations: list[dict] = []
     used_context: list[dict] = []
+    session_out: dict = {}
     for msg in messages:
         if isinstance(msg, ToolMessage):
             parsed = _parse_tool_payload(_ensure_str(msg.content))
@@ -406,6 +424,8 @@ def run_graph(question: str, history: list | None = None) -> dict:
                     citations = parsed.get("citations", [])
                 if not used_context and isinstance(parsed.get("used_context"), list):
                     used_context = parsed.get("used_context", [])
+                if not session_out and isinstance(parsed.get("session"), dict):
+                    session_out = parsed.get("session", {})
             tool_results.append(
                 {
                     "name": getattr(msg, "name", "") or "tool",
@@ -418,4 +438,5 @@ def run_graph(question: str, history: list | None = None) -> dict:
         "tool_results": tool_results,
         "citations": citations,
         "used_context": used_context,
+        "session": session_out,
     }

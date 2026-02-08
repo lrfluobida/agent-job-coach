@@ -24,6 +24,14 @@ class Settings(BaseModel):
     max_citations: int = 3
     filesystem_sync_enabled: bool = True
     filesystem_sync_interval_s: float = 5.0
+    redis_host: str = "localhost"
+    redis_port: int = 6379
+    redis_db: int = 1
+    redis_password: str | None = None
+    redis_username: str | None = None
+    redis_ssl: bool = False
+    redis_lock_ttl_ms: int = 15000
+    redis_lock_wait_ms: int = 3000
 
 def get_settings() -> Settings:
     import os
@@ -51,4 +59,12 @@ def get_settings() -> Settings:
         max_citations=int(os.getenv("MAX_CITATIONS", "3")),
         filesystem_sync_enabled=os.getenv("FILESYSTEM_SYNC_ENABLED", "true").lower() in {"1", "true", "yes", "on"},
         filesystem_sync_interval_s=float(os.getenv("FILESYSTEM_SYNC_INTERVAL_S", "5")),
+        redis_host=os.getenv("REDIS_HOST", "localhost"),
+        redis_port=int(os.getenv("REDIS_PORT", "6379")),
+        redis_db=int(os.getenv("REDIS_DB", "1")),
+        redis_password=os.getenv("REDIS_PASSWORD"),
+        redis_username=os.getenv("REDIS_USERNAME"),
+        redis_ssl=os.getenv("REDIS_SSL", "false").lower() in {"1", "true", "yes", "on"},
+        redis_lock_ttl_ms=int(os.getenv("REDIS_LOCK_TTL_MS", "15000")),
+        redis_lock_wait_ms=int(os.getenv("REDIS_LOCK_WAIT_MS", "3000")),
     )

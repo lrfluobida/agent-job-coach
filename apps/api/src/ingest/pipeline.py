@@ -6,6 +6,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+from src.ingest.note_qa_parser import build_qa_card_document, metadata_for_qa_card, parse_note_to_qa_cards
 from src.rag.chunking import chunk_text
 from src.rag.embeddings import embed_texts
 from src.rag.store import delete_by_source, upsert_chunks
@@ -82,21 +83,37 @@ def ingest_text(
     source_id: str,
     metadata: dict | None = None,
 ) -> dict:
-    chunks = chunk_text(text)
     delete_by_source(source_id)
 
+    base_meta = metadata.copy() if metadata else {}
+    base_meta.update({"source_id": source_id, "source_type": source_type})
+    uploaded_at = datetime.now(timezone.utc).isoformat()
+
+    if source_type == "note":
+        cards = parse_note_to_qa_cards(text, source_id=source_id)
+        if cards:
+            chunks = [build_qa_card_document(card) for card in cards]
+            embeddings = embed_texts(chunks)
+            ids: list[str] = []
+            metadatas: list[dict] = []
+            for index, card in enumerate(cards):
+                ids.append(f"{source_id}:qa:{index}")
+                chunk_meta = dict(base_meta)
+                chunk_meta.update(metadata_for_qa_card(card))
+                chunk_meta.update({"chunk_index": index, "uploaded_at": uploaded_at})
+                metadatas.append(chunk_meta)
+
+            upsert_chunks(ids=ids, chunks=chunks, embeddings=embeddings, metadatas=metadatas)
+            logger.info("ingest_note_qa source_id=%s qa_cards=%s", source_id, len(chunks))
+            return {"ok": True, "source_id": source_id, "source_type": source_type, "chunks": len(chunks)}
+
+    chunks = chunk_text(text)
     if not chunks:
         return {"ok": True, "source_id": source_id, "source_type": source_type, "chunks": 0}
 
     embeddings = embed_texts(chunks)
-
     ids: list[str] = []
     metadatas: list[dict] = []
-    base_meta = metadata.copy() if metadata else {}
-    base_meta.update({"source_id": source_id, "source_type": source_type})
-
-    uploaded_at = datetime.now(timezone.utc).isoformat()
-
     for index, _chunk in enumerate(chunks):
         ids.append(f"{source_id}:{index}")
         chunk_meta = dict(base_meta)
@@ -104,7 +121,5 @@ def ingest_text(
         metadatas.append(chunk_meta)
 
     upsert_chunks(ids=ids, chunks=chunks, embeddings=embeddings, metadatas=metadatas)
-
     logger.info("ingest_text source_id=%s chunks=%s", source_id, len(chunks))
-
     return {"ok": True, "source_id": source_id, "source_type": source_type, "chunks": len(chunks)}
